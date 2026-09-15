@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f766e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="קניות">
+<title>רשימת קניות</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+<script>
+  try {
+    var savedTheme = localStorage.getItem("shoppingList.theme.v1");
+    if (savedTheme === "dark" || savedTheme === "light") {
+      document.documentElement.setAttribute("data-theme", savedTheme);
+    }
+  } catch (e) {}
+</script>
+</head>
+<body>
+<div id="app">
+
+  <header class="app-header">
+    <div class="header-top">
+      <h1>🛒 רשימת קניות</h1>
+      <div class="header-actions">
+        <button class="icon-btn" id="themeToggleBtn" aria-label="החלף מצב תצוגה" title="החלף מצב תצוגה">🌙</button>
+        <button class="icon-btn" id="templatesBtn" aria-label="תבניות מועדפות" title="תבניות מועדפות">⭐</button>
+        <button class="icon-btn" id="resetAllBtn" aria-label="אפס רשימה שלמה" title="אפס רשימה שלמה">🗑️</button>
+      </div>
+    </div>
+    <p class="subtitle" id="subtitle">הרשימה ריקה</p>
+  </header>
+
+  <div class="search-row">
+    <div class="search-box">
+      <span class="search-icon">🔍</span>
+      <input type="text" id="searchInput" placeholder="חיפוש ברשימה..." autocomplete="off">
+      <button class="clear-search hidden" id="clearSearchBtn" aria-label="נקה חיפוש">✕</button>
+    </div>
+  </div>
+
+  <div class="filter-row" id="filterRow"></div>
+
+  <div class="bought-bar hidden" id="boughtBar">
+    <span id="boughtBarText"></span>
+    <button class="bought-bar-btn" id="clearBoughtBtn">🧹 ניקוי נקנו</button>
+  </div>
+
+  <main class="list-container" id="listContainer"></main>
+
+  <div class="empty-state hidden" id="emptyState">
+    <div class="empty-emoji">🛒</div>
+    <p>הרשימה ריקה</p>
+    <span>הוסיפו פריט ראשון בתחתית המסך</span>
+  </div>
+
+  <footer class="add-bar">
+    <div class="add-input-row">
+      <input type="text" id="newItemInput" placeholder="הוסיפו פריט לרשימה..." autocomplete="off" maxlength="60">
+      <button class="add-btn" id="addBtn" aria-label="הוסף פריט">+</button>
+    </div>
+  </footer>
+
+  <!-- Templates Modal -->
+  <div class="modal-overlay hidden" id="templatesOverlay">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2>תבניות מועדפות</h2>
+        <button class="icon-btn" id="closeTemplatesBtn">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="save-template-row">
+          <input type="text" id="templateNameInput" placeholder="שם התבנית (למשל: קניות שבועיות)" maxlength="40">
+          <button class="save-template-btn" id="saveTemplateBtn">שמור רשימה נוכחית</button>
+        </div>
+        <div class="templates-list" id="templatesList"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm Modal -->
+  <div class="modal-overlay hidden" id="confirmOverlay">
+    <div class="confirm-sheet">
+      <p id="confirmMessage"></p>
+      <div class="confirm-actions">
+        <button class="confirm-cancel" id="confirmCancelBtn">ביטול</button>
+        <button class="confirm-ok" id="confirmOkBtn">אישור</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast hidden" id="toast"></div>
+
+</div>
+<script src="app.js"></script>
+</body>
+</html>
