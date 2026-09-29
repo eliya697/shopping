@@ -27,20 +27,30 @@
 
   <header class="app-header">
     <div class="header-top">
-      <h1>🛒 רשימת קניות</h1>
+      <h1 id="appTitle">🛒 רשימת קניות</h1>
+      <button class="list-switcher hidden" id="listSwitcherBtn" aria-label="החלפת רשימה">
+        <span class="list-switcher-name" id="listTitle"></span>
+        <span class="list-switcher-chev">▾</span>
+      </button>
       <div class="header-actions">
         <button class="icon-btn" id="themeToggleBtn" aria-label="החלף מצב תצוגה" title="החלף מצב תצוגה">🌙</button>
         <button class="icon-btn" id="templatesBtn" aria-label="תבניות מועדפות" title="תבניות מועדפות">⭐</button>
         <button class="icon-btn" id="resetAllBtn" aria-label="אפס רשימה שלמה" title="אפס רשימה שלמה">🗑️</button>
       </div>
     </div>
-    <p class="subtitle" id="subtitle">הרשימה ריקה</p>
+
+    <div class="subtitle-row">
+      <p class="subtitle" id="subtitle">הרשימה ריקה</p>
+      <button class="conn-pill hidden" id="connPill" aria-live="polite">
+        <span class="sync-dot" id="syncDot"></span>
+        <span id="connText"></span>
+      </button>
+    </div>
 
     <div class="account-row hidden" id="accountRow">
       <button class="enable-sync-btn hidden" id="enableSyncBtn">☁️ הפעלת סנכרון ושיתוף</button>
 
       <div class="id-badge hidden" id="idBadge">
-        <span class="sync-dot" id="syncDot" title="לא מחובר"></span>
         <span class="id-label">ID</span>
         <code id="userIdShort" dir="ltr"></code>
         <button class="id-copy-btn" id="copyIdBtn" aria-label="העתק מזהה משתמש" title="העתק מזהה">📋 העתק</button>
@@ -58,6 +68,10 @@
       <input type="text" id="searchInput" placeholder="חיפוש ברשימה..." autocomplete="off">
       <button class="clear-search hidden" id="clearSearchBtn" aria-label="נקה חיפוש">✕</button>
     </div>
+    <button class="layout-toggle" id="layoutToggleBtn" aria-pressed="false" title="סידור לפי מסלול בסופר">
+      🧭 <span>מסלול</span>
+    </button>
+    <button class="order-btn hidden" id="orderBtn" aria-label="סדר המחלקות" title="סדר המחלקות">⚙️</button>
   </div>
 
   <div class="filter-row" id="filterRow"></div>
@@ -76,11 +90,123 @@
   </div>
 
   <footer class="add-bar">
+    <div class="voice-panel hidden" id="voicePanel" role="status">
+      <span class="voice-pulse" aria-hidden="true"></span>
+      <span class="voice-text" id="voiceText">מקשיב…</span>
+      <button class="voice-stop" id="voiceStopBtn">סיום</button>
+    </div>
+    <div class="quick-strip hidden" id="quickStrip" aria-label="הוספה מהירה"></div>
     <div class="add-input-row">
-      <input type="text" id="newItemInput" placeholder="הוסיפו פריט לרשימה..." autocomplete="off" maxlength="60">
+      <div class="add-field">
+        <button class="field-btn" id="quickAddBtn" aria-label="פריטים שקונים הרבה" title="פריטים שקונים הרבה">⚡</button>
+        <input type="text" id="newItemInput" placeholder="הוסיפו פריט (למשל: 2 חלב)" autocomplete="off" maxlength="80" enterkeyhint="done">
+        <button class="field-btn hidden" id="micBtn" aria-label="הוספה בקול" title="הוספה בקול">🎤</button>
+      </div>
       <button class="add-btn" id="addBtn" aria-label="הוסף פריט">+</button>
     </div>
   </footer>
+
+  <!-- Lists Modal -->
+  <div class="modal-overlay hidden" id="listsOverlay">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2>הרשימות שלי</h2>
+        <button class="icon-btn" id="closeListsBtn" aria-label="סגור">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="acc-list" id="listsList"></div>
+
+        <section class="acc-section spaced">
+          <h3>רשימה חדשה</h3>
+          <div class="acc-card">
+            <div class="acc-field-row">
+              <input type="text" id="newListInput" maxlength="40" placeholder="שם הרשימה" autocomplete="off">
+              <button class="small-btn primary" id="createListBtn">יצירה</button>
+            </div>
+            <div class="suggestion-chips" id="listNameSuggestions"></div>
+          </div>
+        </section>
+
+        <section class="acc-section">
+          <h3>הצטרפות לרשימה של מישהו אחר</h3>
+          <div class="acc-card">
+            <div class="acc-label">הזינו את קוד ההזמנה שקיבלתם (או פשוט פתחו את הקישור ששלחו לכם)</div>
+            <div class="acc-field-row">
+              <input type="text" id="joinCodeInput" maxlength="12" placeholder="ABCD-2345" dir="ltr" autocomplete="off" spellcheck="false" autocapitalize="characters">
+              <button class="small-btn primary" id="joinCodeBtn">הצטרפות</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- Item details Modal -->
+  <div class="modal-overlay hidden" id="itemOverlay">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2>פרטי פריט</h2>
+        <button class="icon-btn" id="closeItemBtn" aria-label="סגור">✕</button>
+      </div>
+      <div class="modal-body">
+        <label class="field-label" for="itemNameInput">שם</label>
+        <input class="text-field" type="text" id="itemNameInput" maxlength="80" autocomplete="off">
+
+        <label class="field-label" for="itemQtyInput">כמות</label>
+        <div class="qty-editor">
+          <button class="qty-step" id="qtyMinusBtn" aria-label="פחות">–</button>
+          <input class="text-field" type="text" id="itemQtyInput" maxlength="30" placeholder="למשל 3, 1 ק״ג, 2 חבילות" autocomplete="off">
+          <button class="qty-step" id="qtyPlusBtn" aria-label="יותר">+</button>
+        </div>
+        <div class="suggestion-chips" id="unitChips"></div>
+
+        <label class="field-label" for="itemNotesInput">הערות</label>
+        <textarea class="text-field" id="itemNotesInput" rows="2" maxlength="200" placeholder="מותג מסוים, אורגני בלבד…"></textarea>
+
+        <div class="field-label">מחלקה בסופר</div>
+        <div class="category-grid" id="categoryGrid"></div>
+
+        <div class="item-meta" id="itemMeta"></div>
+
+        <div class="sheet-actions">
+          <button class="small-btn danger" id="deleteItemBtn">🗑️ מחיקה</button>
+          <button class="small-btn primary grow" id="saveItemBtn">שמירה</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick-add Modal -->
+  <div class="modal-overlay hidden" id="quickOverlay">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2>⚡ קונים הרבה</h2>
+        <button class="icon-btn" id="closeQuickBtn" aria-label="סגור">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="search-box sheet-search">
+          <span class="search-icon">🔍</span>
+          <input type="text" id="quickSearchInput" placeholder="חיפוש בהיסטוריה..." autocomplete="off">
+        </div>
+        <div class="acc-list" id="quickList"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Store layout order Modal -->
+  <div class="modal-overlay hidden" id="orderOverlay">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2>🧭 סדר המחלקות בסופר</h2>
+        <button class="icon-btn" id="closeOrderBtn" aria-label="סגור">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="welcome-text">סדרו את המחלקות לפי המסלול שאתם עושים בסופר. כברירת מחדל: ירקות בכניסה, מוצרי מדף באמצע, וקירור וקפואים בסוף — כדי שיישארו קרים.</p>
+        <div class="acc-list" id="orderList"></div>
+        <button class="link-btn" id="resetOrderBtn">איפוס לסדר ברירת המחדל</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Templates Modal -->
   <div class="modal-overlay hidden" id="templatesOverlay">
@@ -114,43 +240,41 @@
   <div class="modal-overlay hidden" id="accountOverlay">
     <div class="modal-sheet">
       <div class="modal-header">
-        <h2>שיתוף וחשבון</h2>
+        <h2 id="accountTitle">שיתוף הרשימה</h2>
         <button class="icon-btn" id="closeAccountBtn" aria-label="סגור">✕</button>
       </div>
       <div class="modal-body">
 
-        <section class="acc-section">
-          <h3>החשבון שלי</h3>
+        <section class="acc-section" id="listSettingsSection">
+          <h3>שם הרשימה</h3>
           <div class="acc-card">
             <div class="acc-field-row">
-              <input type="text" id="usernameInput" maxlength="30" placeholder="השם שלך" autocomplete="off">
-              <button class="small-btn" id="saveUsernameBtn">שמור</button>
+              <input type="text" id="listNameInput" maxlength="40" placeholder="שם הרשימה" autocomplete="off">
+              <button class="small-btn" id="saveListNameBtn">שמור</button>
             </div>
-            <div class="acc-label">מזהה המשתמש שלך (תנו אותו למי שרוצה לשתף איתך רשימה)</div>
-            <div class="acc-id-row">
-              <code class="acc-id" id="fullUserId" dir="ltr"></code>
-              <button class="small-btn" id="copyFullIdBtn">📋 העתק</button>
+          </div>
+        </section>
+
+        <section class="acc-section">
+          <h3>הזמנה לרשימה</h3>
+          <div class="acc-card">
+            <div class="acc-label">שלחו את הקישור (או את הקוד) למי שתרצו שיצטרף. כל מי שיש לו אותו יכול להצטרף לרשימה.</div>
+            <div class="invite-code" id="inviteCode" dir="ltr">••••-••••</div>
+            <div class="acc-actions">
+              <button class="small-btn primary" id="shareLinkBtn">🔗 שליחת קישור</button>
+              <button class="small-btn" id="copyCodeBtn">📋 העתקת קוד</button>
+              <button class="small-btn" id="regenCodeBtn" title="הקוד הישן יפסיק לעבוד">🔄 קוד חדש</button>
             </div>
-            <div class="acc-status" id="syncStatusText"></div>
           </div>
         </section>
 
         <section class="acc-section" id="shareSection">
-          <h3>שיתוף הרשימה</h3>
+          <h3>שיתוף לפי מזהה משתמש</h3>
           <div class="acc-card">
-            <div class="acc-label">הדביקו את מזהה המשתמש של מי שתרצו לשתף איתו</div>
             <div class="acc-field-row">
               <input type="text" id="shareUserIdInput" placeholder="מזהה משתמש" dir="ltr" autocomplete="off" spellcheck="false">
               <button class="small-btn primary" id="shareBtn">שתף</button>
             </div>
-          </div>
-        </section>
-
-        <section class="acc-section" id="sharedWithMeSection">
-          <h3>רשימה משותפת</h3>
-          <div class="acc-card">
-            <div class="acc-label" id="sharedByText"></div>
-            <button class="small-btn danger" id="leaveListBtn">עזיבת הרשימה</button>
           </div>
         </section>
 
@@ -159,16 +283,38 @@
           <div class="acc-list" id="membersList"></div>
         </section>
 
-        <section class="acc-section" id="listsSection">
-          <h3>הרשימות שלי</h3>
-          <div class="acc-list" id="listsList"></div>
+        <section class="acc-section" id="sharedWithMeSection">
+          <div class="acc-card">
+            <div class="acc-label" id="sharedByText"></div>
+            <button class="small-btn danger" id="leaveListBtn">עזיבת הרשימה</button>
+          </div>
+        </section>
+
+        <section class="acc-section" id="deleteListSection">
+          <button class="small-btn danger" id="deleteListBtn">🗑️ מחיקת הרשימה</button>
+        </section>
+
+        <section class="acc-section">
+          <h3>החשבון שלי</h3>
+          <div class="acc-card">
+            <div class="acc-field-row">
+              <input type="text" id="usernameInput" maxlength="30" placeholder="השם שלך" autocomplete="off">
+              <button class="small-btn" id="saveUsernameBtn">שמור</button>
+            </div>
+            <div class="acc-label">מזהה המשתמש שלך</div>
+            <div class="acc-id-row">
+              <code class="acc-id" id="fullUserId" dir="ltr"></code>
+              <button class="small-btn" id="copyFullIdBtn">📋 העתק</button>
+            </div>
+            <div class="acc-status" id="syncStatusText"></div>
+          </div>
         </section>
 
         <section class="acc-section">
           <h3>מכשיר נוסף</h3>
           <div class="acc-card">
             <div class="acc-label">כדי לפתוח את אותו חשבון בטלפון או במחשב נוסף, העתיקו את קוד החיבור והזינו אותו שם.
-              <strong>אל תשתפו את הקוד</strong> — הוא כמו סיסמה. לשיתוף רשימה משתמשים במזהה המשתמש בלבד.</div>
+              <strong>אל תשתפו את הקוד</strong> — הוא כמו סיסמה. לשיתוף רשימה משתמשים בקישור ההזמנה.</div>
             <div class="acc-id-row hidden" id="linkCodeRow">
               <code class="acc-id" id="linkCode" dir="ltr"></code>
               <button class="small-btn" id="copyLinkCodeBtn">📋 העתק</button>
@@ -203,7 +349,7 @@
         </div>
 
         <div id="linkPanel" class="hidden">
-          <div class="acc-label">הזינו את קוד החיבור מהמכשיר השני (שיתוף וחשבון ← מכשיר נוסף)</div>
+          <div class="acc-label">הזינו את קוד החיבור מהמכשיר השני (שיתוף ← מכשיר נוסף)</div>
           <div class="acc-field-row">
             <input type="text" id="linkCodeInput" placeholder="קוד חיבור" dir="ltr" autocomplete="off" spellcheck="false">
             <button class="small-btn primary" id="linkDeviceBtn">התחבר</button>
@@ -232,6 +378,10 @@
 </div>
 <script src="config.js"></script>
 <script src="vendor/socket.io.min.js"></script>
+<script src="categories.js"></script>
+<script src="item-parser.js"></script>
+<script src="quick-add.js"></script>
+<script src="voice.js"></script>
 <script src="socket-client.js"></script>
 <script src="pwa-update.js"></script>
 <script src="app.js"></script>

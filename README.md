@@ -1,30 +1,49 @@
 # 🛒 Shopping List PWA
 
-An offline-first shopping list (Hebrew, RTL) with accounts, real-time shared lists and in-app update prompts.
+An offline-first shopping list (Hebrew, RTL) with multiple real-time shared lists, smart supermarket sorting, quick-add, voice input and in-app update prompts.
 
 - **Frontend:** vanilla JS, served from GitHub Pages
 - **Backend:** Node.js + Express + Socket.io + SQLite (`better-sqlite3`), hosted on Render (or Railway / Fly.io)
+
+## Features
+
+| | |
+|---|---|
+| **Multiple lists** | Create lists (“קניות שבועיות”, “בית מרקחת”, “ארוחת שבת”…), switch from the title in the header, rename or delete them. |
+| **Sharing** | Invite by **link or 8-character code** (`?join=ABCD2345`), or by user ID. Members, joins, renames and deletions sync live. |
+| **Quantity & notes** | Free-text quantity (“3”, “1 ק״ג”, “2 חבילות”) and notes (“אורגני בלבד”). Tap an item to edit. The row shows a small quantity pill and a one-line note. |
+| **Smart categories** | 11 supermarket sections, auto-detected from the name. The head noun wins (“מיץ תפוזים” → drinks), and corrections you make are remembered. |
+| **Store layout** | 🧭 toggle groups the list by aisle along a walking path: produce first, chilled and frozen last so they stay cold. ⚙️ reorders the aisles for your store. |
+| **Quick add** | Chips above the input while typing, plus a ⚡ drawer. Ranked by how often and how recently you added each item, favoring items from the current list. |
+| **Offline-first** | Every change is queued locally and replayed on reconnect. The header pill shows *מחובר* / *מסנכרן 3…* / *לא מקוון · 3 ממתינים*. |
+| **Voice** | 🎤 → “תוסיף שני קילו עגבניות, חלב ונייר טואלט” → three items (with “2 ק״ג”), with an **undo** button. |
+
+Typed input understands quantities too: `2 חלב`, `חלב x2`, `חצי קילו גבינה`, and comma-separated lists.
 
 ## Project structure
 
 ```
 shop app/
-├── index.html              # UI: list, share/account modal, welcome modal, update banner
+├── index.html              # UI: list, sheets (lists, item, share, quick-add, aisle order), update banner
 ├── style.css
 ├── app.js                  # state, rendering (keyed DOM patching), actions, sync wiring
-├── socket-client.js        # SyncClient: reconnection, persisted outbox, event forwarding
+├── categories.js           # supermarket sections, auto-categorize, default walking order
+├── item-parser.js          # "2 ק״ג עגבניות" and dictated lists -> items
+├── quick-add.js            # purchase history + frequency/recency ranking
+├── voice.js                # Web Speech API wrapper
+├── socket-client.js        # SyncClient: reconnection, persisted outbox, id remapping
 ├── pwa-update.js           # SW registration + "new version available" banner
 ├── sw.js                   # service worker (versioned precache, SKIP_WAITING)
-├── config.js               # BACKEND_URL  ← set this after deploying the server
+├── config.js               # BACKEND_URL
 ├── vendor/socket.io.min.js # Socket.io client (same-origin, so it works offline)
-├── manifest.json, icon.svg
+├── tests/parser.test.js    # categorizer + parser tests:  node tests/parser.test.js
 ├── .github/workflows/deploy.yml  # Pages deploy; stamps a new version into sw.js
 ├── render.yaml             # Render blueprint for the backend
 └── server/
-    ├── package.json
     ├── server.js           # Express app, CORS, /health, /api/register, /api/me
     ├── sockets.js          # Socket.io auth + events
-    └── db.js               # SQLite schema and queries
+    ├── db.js               # SQLite schema, additive migrations, queries
+    └── test/               # end-to-end socket tests:  npm test  (server must be running)
 ```
 
 ## How it works
@@ -35,47 +54,65 @@ shop app/
 
 | Value | Public? | Purpose |
 |---|---|---|
-| `userId` (UUID v4) | ✅ share it | Others enter it to share a list with you |
+| `userId` (UUID v4) | ✅ share it | Others can share a list with you by ID |
 | `token` (256-bit random) | ❌ secret | Authenticates the socket; shown in the app as the **device link code** |
-| `listId` | – | Your personal list, created with the account |
+| `listId` | – | Your first list, created with the account |
 
-The userId is public, so it can't also be the credential. Otherwise anyone you shared your ID with could sign in as you. The server stores only a SHA-256 hash of the token.
-
-To use the same account on a second device, go to **Share & account → Another device**, copy the link code, and on the new device pick **"I already have an account"**.
+The server stores only a SHA-256 hash of the token. To use the same account on a second device, go to **Share → Another device**, copy the link code, and on the new device pick **"I already have an account"**.
 
 ### Data model (SQLite)
 
 - `users(user_id, username, token_hash, created_at)`
-- `lists(list_id, owner_id, created_at)`
-- `list_members(list_id, user_id, joined_at)` is the `members` array, stored as a join table
-- `items(item_id, list_id, text, category, qty, is_completed, added_by, created_at, updated_at)`
+- `lists(list_id, owner_id, name, share_code, created_at)`
+- `list_members(list_id, user_id, joined_at)` is the members array, stored as a join table
+- `items(item_id, list_id, text, category, quantity, notes, is_completed, added_by, created_at, updated_at)`
+
+`db.js` migrates older databases on startup with additive `ALTER TABLE`s only. The old integer `qty` becomes the text `quantity`, and the migration is safe to re-run.
 
 ### Socket events
 
 Client → server calls all take an ack callback `{ ok, error? }`.
 
-| Client emits | Server broadcasts to room `list:<listId>` |
+| Client emits | Server sends |
 |---|---|
-| `join:list { listId }` | `list:state { list, items }` (to the caller) |
-| `share:list { listId, targetUserId }` | `list:members` + `list:shared_notification` to the target, `lists:updated` |
-| `list:remove_member { listId, userId }` | `list:members`, `list:removed` to that user |
-| `item:add { listId, item }` | `item:added` |
+| `join:list { listId }` | `list:state { list, items }` to the caller |
+| `list:create { listId, name }` | `lists:updated` to your devices |
+| `list:rename { listId, name }` *(owner)* | `list:members` (includes `name`), `lists:updated` |
+| `list:delete { listId }` *(owner)* | `list:removed { reason: "deleted" }` to every member |
+| `list:share_code { listId, regenerate? }` | ack `{ code }`; only the owner can regenerate |
+| `list:join_by_code { code }` | `list:member_joined`, `list:members`, `lists:updated` |
+| `share:list { listId, targetUserId }` *(owner)* | `list:shared_notification` to the target, `list:members`, `lists:updated` |
+| `list:remove_member { listId, userId }` | `list:removed { reason }` to that user, `list:members` |
+| `item:add { listId, item }` | `item:added`, or ack `{ mergedInto }` for a duplicate (see below) |
+| `item:update { listId, itemId, changes }` | `item:updated`; only the fields you send change |
 | `item:toggle { listId, itemId, isCompleted }` | `item:toggled` |
-| `item:update_qty { listId, itemId, qty }` | `item:updated` |
 | `item:delete { listId, itemId }` | `item:deleted` |
-| `item:clear_completed { listId }` | `item:cleared { itemIds }` |
-| `list:reset { listId }` | `item:cleared { itemIds }` |
+| `item:clear_completed` / `list:reset { listId }` | `item:cleared { itemIds }` |
 | `user:rename { username }` | `list:members` |
 
-Every write checks list membership. Only the owner can share or remove members, and a member can leave.
+Every write checks list membership. Nobody can end up with zero lists: you can't delete or leave your only list, and a user removed from their last list gets a fresh one. Wrong invite codes are rate-limited per user (10 per 10 minutes).
 
-### Offline and reconnection
+**Backward compatibility:** clients still running v1 (before they tap *Update*) keep working. The server still accepts `item:update_qty` and integer `qty`, and it sends `qty` alongside `quantity`.
 
-- Changes apply to the screen immediately and go into a **persisted outbox** (`localStorage`). The outbox is sent in order, with acks, whenever the socket is connected, so edits made offline or during a Render cold start survive a reload.
-- Replaying is safe: item ids are generated on the client, adds are `INSERT OR IGNORE`, and toggle/qty send absolute values.
-- On every (re)connect the client flushes the outbox, then re-joins the list and gets a fresh `list:state`.
-- A sleeping Render instance is woken with a `/health` request. Reconnection backs off up to 15s, and the app reconnects right away when the network or the tab comes back. The status dot next to your ID shows 🟢 online / 🟠 connecting / ⚪ offline.
-- The last state of each list is cached, so the list shows instantly and works with no connection at all.
+### Offline-first sync and conflicts
+
+- Every change applies to the screen immediately and goes into a **persisted outbox** (`localStorage`). The outbox is sent in order, with acks, whenever the socket is up. It survives reloads, dead zones and Render cold starts.
+- Replays are safe: ids are generated on the client, adds are idempotent, and toggles and edits send absolute values.
+- **Field-level edits:** `item:update` sends only the changed fields. So if one person changes the quantity while another adds a note, both edits survive.
+- **Duplicate merge:** two people add “חלב” while offline. The second add to reach the server is merged into the existing open item instead of creating a duplicate. The server answers `{ mergedInto }`, and the client points its queued edits and check-offs for that item at the surviving id, then shows a toast.
+- **Edits to deleted items** are ignored (`{ missing: true }`). Ops for a list you were removed from are dropped, and the client re-syncs.
+- While the outbox holds unacknowledged changes for an item, echoes for that item are ignored, so the screen doesn't flicker. After the flush, a fresh `list:state` settles everything.
+- List management (create, rename, delete, invite, join) needs a connection and says so when offline. Item actions all work offline.
+
+### Voice input
+
+This uses the browser's `SpeechRecognition` in `he-IL`. The mic button only appears where it's supported: Chrome, Edge, Android and Safari 14.5+, but not Firefox. The parser:
+- strips command words (תוסיף / צריך / add…),
+- splits on commas, “וגם” and a leading “ו” before a known item,
+- reads number words and units into the quantity,
+- keeps descriptive words with their item (“שמן זית”).
+
+Multi-word items it already knows about (from your history) stay together. Note: in Chrome, speech is processed by Google's speech service.
 
 ### PWA updates
 
@@ -139,6 +176,8 @@ With `BACKEND_URL` empty, the app runs exactly as before: local-only, with no ac
 
 ```bash
 cd server && npm install && npm run dev      # backend on http://localhost:3000
+cd server && npm test                        # socket tests against the running backend
+node tests/parser.test.js                    # parser/categorizer tests
 python -m http.server 5173                   # frontend on http://localhost:5173
 ```
 

@@ -23,6 +23,7 @@
     "list:members",
     "list:shared_notification",
     "list:removed",
+    "list:member_joined",
     "item:added",
     "item:toggled",
     "item:updated",
@@ -203,22 +204,53 @@
           }
           if (this.queue[0] === entry) {
             this.queue.shift();
+            if (res && res.mergedInto) this.remapItem(entry.payload.item.itemId, res.mergedInto);
             this.saveQueue();
           }
           if (!res || !res.ok) this.emitLocal("op_rejected", { entry, error: res && res.error });
+          else if (res.mergedInto) {
+            this.emitLocal("item_merged", {
+              listId: entry.payload.listId,
+              fromId: entry.payload.item.itemId,
+              item: res.item,
+            });
+          }
         }
       } finally {
         this.flushing = false;
       }
     }
 
+    /*
+     * The server merged our offline add into an item someone else created with the
+     * same name. Point our later queued ops (toggle, edit, delete) at that item.
+     */
+    remapItem(fromId, toId) {
+      this.queue.forEach((e) => {
+        if (e.payload && e.payload.itemId === fromId) e.payload.itemId = toId;
+        if (e.op && e.op.id === fromId) e.op.id = toId;
+      });
+    }
+
     saveQueue() {
       try { localStorage.setItem(QUEUE_KEY, JSON.stringify(this.queue)); } catch (e) {}
+      this.emitLocal("queue", this.queue.length);
+    }
+
+    get pendingCount() {
+      return this.queue.length;
     }
 
     clearQueue() {
       this.queue = [];
       this.saveQueue();
+    }
+
+    /* Drop queued ops for a list we no longer have access to. */
+    dropList(listId) {
+      const before = this.queue.length;
+      this.queue = this.queue.filter((e) => !e.payload || e.payload.listId !== listId);
+      if (this.queue.length !== before) this.saveQueue();
     }
 
     pendingFor(listId) {

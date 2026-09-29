@@ -34,7 +34,7 @@ jobs:
           mkdir _site
           rsync -a ./ _site/ \
             --exclude '.git' --exclude '.github' --exclude '.claude' \
-            --exclude 'server' --exclude 'node_modules' --exclude '_site' \
+            --exclude 'server' --exclude 'tests' --exclude 'node_modules' --exclude '_site' \
             --exclude 'README.md' --exclude 'render.yaml'
           VERSION="${GITHUB_SHA::8}-${GITHUB_RUN_NUMBER}"
           sed -i "s/__BUILD_VERSION__/${VERSION}/" _site/sw.js
