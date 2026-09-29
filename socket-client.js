@@ -15,6 +15,11 @@
   const QUEUE_KEY = "shoppingList.pending.v1";
   const ACK_TIMEOUT_MS = 10000;
   const WAKING_AFTER_MS = 4000;
+  const RETRY_MAX_MS = 30000;
+  const FLUSH_RETRY_MS = 5000;
+  const MAX_RETRYABLE_ATTEMPTS = 8;
+  // Handshake errors that mean "this account really doesn't exist / isn't allowed".
+  const DEFINITIVE_AUTH_ERRORS = ["INVALID_TOKEN", "USER_BANNED"];
 
   const FORWARDED_EVENTS = [
     "session",
@@ -52,6 +57,9 @@
       this.activeListId = null;
       this.status = "offline"; // offline | connecting | waking | online
       this.wakeTimer = null;
+      this.retryTimer = null;
+      this.retryDelay = 0;
+      this.flushRetryTimer = null;
       this.kick = this.kick.bind(this);
       this.onVisible = () => { if (document.visibilityState === "visible") this.kick(); };
     }
@@ -97,6 +105,8 @@
 
       socket.on("connect", async () => {
         clearTimeout(this.wakeTimer);
+        clearTimeout(this.retryTimer);
+        this.retryDelay = 0;
         this.setStatus("online");
         await this.flush();
         this.join();
@@ -111,13 +121,19 @@
       });
 
       socket.on("connect_error", (err) => {
-        if (err && err.message === "unauthorized") {
+        // Only a confirmed answer from the server's database signs us out. A bare
+        // "unauthorized" (older server), a timeout or "server_unavailable" (database
+        // still connecting after a cold start) keeps the account and retries.
+        const code = err && err.data && err.data.code;
+        if (DEFINITIVE_AUTH_ERRORS.includes(code)) {
           this.stop();
-          this.emitLocal("auth_error");
+          this.emitLocal("auth_error", { code });
           return;
         }
-        // Usually the free-tier server is still spinning up; Socket.io keeps retrying.
         this.setStatus(navigator.onLine === false ? "offline" : "waking");
+        // Transport errors are retried by Socket.io itself; a refusal from the
+        // server's middleware is not (socket.active is false), so retry ourselves.
+        if (!socket.active) this.scheduleRetry(err && err.data && err.data.retryAfterMs);
       });
 
       FORWARDED_EVENTS.forEach((event) => socket.on(event, (data) => this.emitLocal(event, data)));
@@ -129,6 +145,8 @@
     stop() {
       this.stopped = true;
       clearTimeout(this.wakeTimer);
+      clearTimeout(this.retryTimer);
+      clearTimeout(this.flushRetryTimer);
       global.removeEventListener("online", this.kick);
       document.removeEventListener("visibilitychange", this.onVisible);
       if (this.socket) {
@@ -142,8 +160,21 @@
     /* Reconnect right away (instead of waiting for backoff) when the network or tab comes back. */
     kick() {
       if (this.stopped || !this.socket || this.socket.connected) return;
+      clearTimeout(this.retryTimer);
       this.wake();
       this.socket.connect();
+    }
+
+    /* Backoff for reconnects Socket.io won't do on its own (server refused the handshake). */
+    scheduleRetry(hintMs) {
+      clearTimeout(this.retryTimer);
+      this.retryDelay = Math.min(RETRY_MAX_MS, Math.max(Number(hintMs) || 0, this.retryDelay ? this.retryDelay * 2 : 2000));
+      const delay = this.retryDelay * (0.75 + Math.random() * 0.5);
+      this.retryTimer = setTimeout(() => {
+        if (this.stopped || !this.socket || this.socket.connected || this.socket.active) return;
+        this.wake();
+        this.socket.connect();
+      }, delay);
     }
 
     /* A plain HTTP hit is the quickest way to make a sleeping Render instance start booting. */
@@ -168,7 +199,13 @@
       const listId = this.activeListId;
       if (!listId || !this.socket || !this.socket.connected) return;
       this.socket.emit("join:list", { listId }, (res) => {
-        if (res && !res.ok) this.emitLocal("join_failed", { listId, error: res.error });
+        if (!res || res.ok) return;
+        // A server-side hiccup is not "you lost access" — don't forget the list over it.
+        if (res.retryable) {
+          setTimeout(() => { if (this.activeListId === listId) this.join(); }, FLUSH_RETRY_MS);
+          return;
+        }
+        this.emitLocal("join_failed", { listId, error: res.error });
       });
     }
 
@@ -201,6 +238,16 @@
             res = await this.socket.timeout(ACK_TIMEOUT_MS).emitWithAck(entry.event, entry.payload);
           } catch (e) {
             break; // no ack in time; retry on the next flush/reconnect
+          }
+          // Server couldn't process it right now (e.g. database blip): keep it queued and retry.
+          if (res && !res.ok && res.retryable && this.queue[0] === entry) {
+            entry.attempts = (entry.attempts || 0) + 1;
+            if (entry.attempts < MAX_RETRYABLE_ATTEMPTS) {
+              this.saveQueue();
+              clearTimeout(this.flushRetryTimer);
+              this.flushRetryTimer = setTimeout(() => this.flush(), FLUSH_RETRY_MS * entry.attempts);
+              break;
+            }
           }
           if (this.queue[0] === entry) {
             this.queue.shift();

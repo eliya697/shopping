@@ -64,6 +64,9 @@ self.addEventListener("fetch", (event) => {
   // Never touch cross-origin traffic (the Socket.io / API backend).
   if (url.origin !== self.location.origin) return;
 
+  // The admin dashboard is network-only: never cached, never swapped for the app shell.
+  if (/\/admin(\.html|\.js)?$/.test(url.pathname)) return;
+
   // App navigations: serve the precached shell (versioned together with the JS/CSS).
   if (request.mode === "navigate") {
     event.respondWith((async () => {

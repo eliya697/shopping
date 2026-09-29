@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>ניהול מערכת</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #f6f7f9; --surface: #fff; --text: #1c2024; --text-dim: #6b7280;
+    --accent: #0f9d78; --accent-dark: #0b7d5f; --accent-soft: #e3f6ef;
+    --danger: #e5484d; --danger-soft: #fde8e8; --warn: #b7791f; --warn-soft: #fdf3e1;
+    --border: #e7e8ea; --shadow: 0 2px 10px rgba(20, 20, 30, .06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101214; --surface: #1a1d21; --text: #f2f3f5; --text-dim: #9aa0a6;
+      --accent: #22c99b; --accent-dark: #1aa885; --accent-soft: #123329;
+      --danger: #ff6b6f; --danger-soft: #33191b; --warn: #f0b429; --warn-soft: #33290f;
+      --border: #2a2d31; --shadow: 0 2px 14px rgba(0, 0, 0, .4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Arial, sans-serif; }
+  .hidden { display: none !important; }
+  button { font: inherit; cursor: pointer; border: 0; border-radius: 10px; padding: 8px 14px; background: var(--accent); color: #fff; font-weight: 600; }
+  button:hover { background: var(--accent-dark); }
+  button:disabled { opacity: .55; cursor: default; }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button.ghost:hover { background: var(--bg); }
+  button.danger { background: var(--danger-soft); color: var(--danger); }
+  button.danger:hover { background: var(--danger); color: #fff; }
+  button.small { padding: 4px 10px; font-size: 13px; }
+  input { font: inherit; width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12.5px; direction: ltr; unicode-bidi: embed; }
+  .dim { color: var(--text-dim); }
+
+  /* Login */
+  #loginView { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
+  .login-card { width: 100%; max-width: 380px; background: var(--surface); border: 1px solid var(--border); border-radius: 18px; padding: 28px 24px; box-shadow: var(--shadow); }
+  .login-card h1 { margin: 0 0 4px; font-size: 22px; }
+  .login-card p { margin: 0 0 20px; }
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+  .login-card button { width: 100%; padding: 11px; margin-top: 4px; }
+  .msg { font-size: 14px; margin-top: 12px; }
+  .msg.error { color: var(--danger); }
+
+  /* Dashboard */
+  header { position: sticky; top: 0; z-index: 5; background: var(--surface); border-bottom: 1px solid var(--border); }
+  .bar { max-width: 1200px; margin: 0 auto; padding: 12px 16px; display: flex; align-items: center; gap: 12px; }
+  .bar h1 { font-size: 18px; margin: 0; flex: 1; }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 48px; display: grid; gap: 20px; }
+  section { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow); padding: 18px; min-width: 0; }
+  .section-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  .section-head h2 { margin: 0; font-size: 17px; flex: 1; }
+  .section-head input { max-width: 240px; padding: 7px 10px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .stat { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+  .stat .label { font-size: 13px; color: var(--text-dim); }
+  .stat .value { font-size: 22px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .stat .sub { font-size: 12.5px; color: var(--text-dim); margin-top: 2px; }
+  /* "59.6 MB" must not be reordered to "MB 59.6" inside the RTL page. */
+  .stat .value, .stat .sub { unicode-bidi: plaintext; text-align: right; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; padding: 2px 10px; border-radius: 999px; }
+  .pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .pill.ok { color: var(--accent); background: var(--accent-soft); }
+  .pill.warn { color: var(--warn); background: var(--warn-soft); }
+  .pill.bad { color: var(--danger); background: var(--danger-soft); }
+  .updated { font-size: 12.5px; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: right; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  th { font-size: 12.5px; color: var(--text-dim); font-weight: 600; white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  td.num { font-variant-numeric: tabular-nums; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .chip { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 0 6px; cursor: copy; }
+  .id { cursor: copy; }
+  .empty { text-align: center; padding: 24px; color: var(--text-dim); }
+  .tools { display: flex; flex-wrap: wrap; gap: 10px; }
+  .tool-note { font-size: 13px; margin-top: 10px; }
+  #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 18px; border-radius: 10px; font-size: 14px; box-shadow: var(--shadow); z-index: 20; max-width: calc(100% - 32px); }
+</style>
+</head>
+<body>
+
+<div id="loginView" class="hidden">
+  <form class="login-card" id="loginForm" autocomplete="off">
+    <h1>🔐 ניהול מערכת</h1>
+    <p class="dim">כניסה למפתח בלבד</p>
+    <div class="field">
+      <label for="emailInput">אימייל מנהל</label>
+      <input id="emailInput" type="email" dir="ltr" autocomplete="username" required>
+    </div>
+    <div class="field">
+      <label for="keyInput">מפתח סודי (ADMIN_SECRET_KEY)</label>
+      <input id="keyInput" type="password" dir="ltr" autocomplete="current-password" required>
+    </div>
+    <button type="submit" id="loginBtn">כניסה</button>
+    <div class="msg hidden" id="loginMsg"></div>
+  </form>
+</div>
+
+<div id="dashView" class="hidden">
+  <header>
+    <div class="bar">
+      <h1>🛒 לוח ניהול</h1>
+      <span class="updated dim" id="updatedAt"></span>
+      <button class="ghost small" id="refreshBtn">רענון</button>
+      <button class="ghost small" id="logoutBtn">יציאה</button>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <div class="section-head">
+        <h2>מצב המערכת</h2>
+        <span class="pill warn" id="dbPill">טוען…</span>
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="label">זמן פעילות</div><div class="value" id="statUptime">—</div><div class="sub" id="statStarted"></div></div>
+        <div class="stat"><div class="label">זיכרון (RSS)</div><div class="value" id="statMemory">—</div><div class="sub" id="statHeap"></div></div>
+        <div class="stat"><div class="label">חיבורי Socket פעילים</div><div class="value" id="statSockets">—</div><div class="sub" id="statNode"></div></div>
+        <div class="stat"><div class="label">מסד נתונים</div><div class="value" id="statDb">—</div><div class="sub" id="statDbSub"></div></div>
+        <div class="stat"><div class="label">משתמשים · רשימות</div><div class="value" id="statCounts">—</div><div class="sub" id="statItems"></div></div>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>משתמשים <span class="dim" id="usersCount"></span></h2>
+        <input type="search" id="usersFilter" placeholder="חיפוש לפי שם או מזהה">
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>שם</th><th>מזהה</th><th>פעילות אחרונה</th><th>נוצר</th><th>רשימות</th><th></th></tr></thead>
+          <tbody id="usersBody"><tr><td colspan="6" class="empty">טוען…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>רשימות <span class="dim" id="listsCount"></span></h2>
+        <input type="search" id="listsFilter" placeholder="חיפוש לפי שם, בעלים או מזהה">
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>שם</th><th>בעלים</th><th>מזהה</th><th>פריטים (פתוחים/סה״כ)</th><th>משתתפים</th><th>פעילות אחרונה</th><th></th></tr></thead>
+          <tbody id="listsBody"><tr><td colspan="7" class="empty">טוען…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head"><h2>כלי מסד נתונים</h2></div>
+      <div class="tools">
+        <button id="cleanupBtn">🧹 ניקוי פריטים שנקנו לפני יותר מ-14 יום</button>
+        <button class="ghost" id="backupBtn">⬇️ הורדת גיבוי (JSON)</button>
+      </div>
+      <p class="tool-note dim">הגיבוי כולל את כל הטבלאות, כולל גיבובי הטוקנים של המשתמשים — שמרו אותו במקום מאובטח.</p>
+    </section>
+  </main>
+</div>
+
+<div id="toast" class="hidden" role="status"></div>
+
+<script src="config.js"></script>
+<script src="admin.js"></script>
+</body>
+</html>

@@ -1644,9 +1644,15 @@
     // Server refused a queued change: re-sync so the screen matches the truth.
     client.on("op_rejected", () => client.join());
 
-    client.on("auth_error", () => {
-      // Token unknown to the server (e.g. its database was reset).
+    // Fired only after the server's database confirmed the token is unknown or blocked
+    // (INVALID_TOKEN / USER_BANNED). Cold starts, timeouts and DB hiccups never get here:
+    // the client stays in "connecting"/"waking" and keeps the account and outbox.
+    client.on("auth_error", ({ code } = {}) => {
       dropAccount();
+      if (code === "USER_BANNED") {
+        showToast("החשבון הזה הושבת. הרשימה נשמרה במכשיר.", 6000);
+        return;
+      }
       showToast("החשבון לא נמצא בשרת. הרשימה נשמרה במכשיר — אפשר ליצור חשבון חדש.", 6000);
       openWelcome("החשבון הקודם לא נמצא בשרת. צרו חשבון חדש כדי להמשיך לסנכרן — הפריטים שעל המסך יישמרו.");
     });
@@ -1765,6 +1771,10 @@
       const res = await backendFetch("/api/me", { headers: { Authorization: "Bearer " + token } });
       if (res.status === 401) {
         setWelcomeStatus("קוד החיבור לא תקין", true);
+        return;
+      }
+      if (res.status === 503) {
+        setWelcomeStatus("השרת עדיין עולה. נסו שוב בעוד כמה שניות.", true);
         return;
       }
       if (!res.ok) throw new Error("link failed");

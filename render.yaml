@@ -13,10 +13,11 @@ services:
         value: "24"
       - key: ALLOWED_ORIGINS
         value: https://eliya697.github.io
-      # With a persistent disk (paid plans), point the database at it:
-      # - key: DB_PATH
-      #   value: /var/data/shopping.db
-    # disk:
-    #   name: data
-    #   mountPath: /var/data
-    #   sizeGB: 1
+      # Persistent database (Turso). Set the values in the Render dashboard — never commit them.
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      # Admin dashboard (admin.html). At least 16 random characters.
+      - key: ADMIN_SECRET_KEY
+        sync: false

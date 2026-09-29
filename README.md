@@ -3,7 +3,7 @@
 An offline-first shopping list (Hebrew, RTL) with multiple real-time shared lists, smart supermarket sorting, quick-add, voice input and in-app update prompts.
 
 - **Frontend:** vanilla JS, served from GitHub Pages
-- **Backend:** Node.js + Express + Socket.io + SQLite (`better-sqlite3`), hosted on Render (or Railway / Fly.io)
+- **Backend:** Node.js + Express + Socket.io + libSQL/**Turso** (hosted SQLite; a local file in development), hosted on Render
 
 ## Features
 
@@ -35,6 +35,7 @@ shop app/
 ├── pwa-update.js           # SW registration + "new version available" banner
 ├── sw.js                   # service worker (versioned precache, SKIP_WAITING)
 ├── config.js               # BACKEND_URL
+├── admin.html / admin.js   # hidden admin dashboard (developer only)
 ├── vendor/socket.io.min.js # Socket.io client (same-origin, so it works offline)
 ├── tests/parser.test.js    # categorizer + parser tests:  node tests/parser.test.js
 ├── .github/workflows/deploy.yml  # Pages deploy; stamps a new version into sw.js
@@ -42,7 +43,8 @@ shop app/
 └── server/
     ├── server.js           # Express app, CORS, /health, /api/register, /api/me
     ├── sockets.js          # Socket.io auth + events
-    ├── db.js               # SQLite schema, additive migrations, queries
+    ├── admin.js            # /api/admin/* (login, health, users, lists, cleanup, export)
+    ├── db.js               # libSQL/Turso schema, additive migrations, queries
     └── test/               # end-to-end socket tests:  npm test  (server must be running)
 ```
 
@@ -60,14 +62,14 @@ shop app/
 
 The server stores only a SHA-256 hash of the token. To use the same account on a second device, go to **Share → Another device**, copy the link code, and on the new device pick **"I already have an account"**.
 
-### Data model (SQLite)
+### Data model (SQLite dialect, stored in Turso)
 
-- `users(user_id, username, token_hash, created_at)`
+- `users(user_id, username, token_hash, created_at, last_seen_at)`
 - `lists(list_id, owner_id, name, share_code, created_at)`
 - `list_members(list_id, user_id, joined_at)` is the members array, stored as a join table
 - `items(item_id, list_id, text, category, quantity, notes, is_completed, added_by, created_at, updated_at)`
 
-`db.js` migrates older databases on startup with additive `ALTER TABLE`s only. The old integer `qty` becomes the text `quantity`, and the migration is safe to re-run.
+`db.js` connects to Turso when `TURSO_DATABASE_URL` is set, otherwise to `server/data/shopping.db`. It migrates older databases on startup with additive `ALTER TABLE`s only. The old integer `qty` becomes the text `quantity`, and the migration is safe to re-run.
 
 ### Socket events
 
@@ -103,6 +105,32 @@ Every write checks list membership. Nobody can end up with zero lists: you can't
 - **Edits to deleted items** are ignored (`{ missing: true }`). Ops for a list you were removed from are dropped, and the client re-syncs.
 - While the outbox holds unacknowledged changes for an item, echoes for that item are ignored, so the screen doesn't flicker. After the flush, a fresh `list:state` settles everything.
 - List management (create, rename, delete, invite, join) needs a connection and says so when offline. Item actions all work offline.
+
+### Cold starts and sign-out rules
+
+The server listens right away and connects to the database in the background, retrying until it answers. The app only signs out on a **confirmed** answer from the database:
+
+| Handshake result | `err.data.code` | App behaviour |
+|---|---|---|
+| Token not in the database | `INVALID_TOKEN` (message `unauthorized`) | Sign out, keep items as a local list |
+| Account blocked | `USER_BANNED` | Sign out |
+| Database not connected yet / query failed | `SERVER_UNAVAILABLE` (message `server_unavailable`) | Stay signed in, show *השרת מתעורר*, retry with backoff |
+| Network error / timeout | – | Stay signed in, Socket.io retries |
+
+Server-side failures during a call answer `{ ok: false, retryable: true }`. The outbox keeps those operations and retries them, and a failed `join:list` never makes the app forget a list.
+
+### Admin dashboard
+
+`admin.html` isn't linked from the app. Log in with the admin email and `ADMIN_SECRET_KEY`. You get a 12-hour HMAC-signed session token, stored in `localStorage` and sent as `Authorization: Bearer …`. Failed logins are limited to 5 per 15 minutes per IP.
+
+| Endpoint | |
+|---|---|
+| `POST /api/admin/login` | `{ email, secretKey }` → `{ token, expiresAt }` |
+| `GET /api/admin/health` | uptime, memory, active sockets, DB status/latency/size/counts |
+| `GET /api/admin/users` · `DELETE /api/admin/users/:id` | users with last activity and list ids; deleting removes their owned lists and memberships and disconnects them |
+| `GET /api/admin/lists` · `DELETE /api/admin/lists/:id` | lists with item/member counts; members are evicted live |
+| `POST /api/admin/cleanup` | permanently deletes items checked more than 14 days ago |
+| `GET /api/admin/export` | full JSON backup of every table (includes token hashes, so keep it private) |
 
 ### Voice input
 
@@ -144,17 +172,23 @@ Users on the old version (cache `shopping-list-v2`) have no banner code yet, so 
    |---|---|
    | `ALLOWED_ORIGINS` | `https://eliya697.github.io` (origin only, **no** `/shopping` path; comma-separate extra origins) |
    | `NODE_VERSION` | `24` |
-   | `DB_PATH` | *(optional)* e.g. `/var/data/shopping.db` on a persistent disk |
+   | `TURSO_DATABASE_URL` | `libsql://<db>-<org>.turso.io` (see below) |
+   | `TURSO_AUTH_TOKEN` | the database token from `turso db tokens create` |
+   | `ADMIN_SECRET_KEY` | 16+ random characters; enables `admin.html` |
 
    `PORT` is set by Render automatically.
 4. After the deploy, open `https://<your-service>.onrender.com/health` and check that it returns `{"ok":true,...}`.
 
-> ⚠️ **Persistence on Render's free plan:** free web services have an **ephemeral filesystem**. The SQLite file is wiped on every redeploy/restart, and free instances also restart after spinning down. SQLite alone does not make data survive there. Options:
-> - **Render Starter + persistent disk:** uncomment the `disk` block in `render.yaml` and set `DB_PATH=/var/data/shopping.db`.
-> - **Railway:** attach a Volume mounted at `/data` and set `DB_PATH=/data/shopping.db`.
-> - **Fly.io:** `fly volumes create data`, mount it at `/data`, and set `DB_PATH=/data/shopping.db`.
+> ⚠️ **Persistence:** Render's free plan has an ephemeral disk that is wiped whenever the instance spins down, so the data lives in **Turso** instead. Create the database once:
 >
-> If the database is reset anyway, the app notices (the saved token is rejected), keeps the items on screen as a local list, and offers to create a new account.
+> ```bash
+> turso auth signup            # or: turso auth login
+> turso db create shopping-list
+> turso db show shopping-list --url      # -> TURSO_DATABASE_URL
+> turso db tokens create shopping-list   # -> TURSO_AUTH_TOKEN
+> ```
+>
+> The schema is created automatically on first start. Without `TURSO_DATABASE_URL` the server falls back to a local file and logs a warning, and the admin dashboard shows *"קובץ מקומי"*.
 
 ### 2. Point the frontend at the backend
 
@@ -175,7 +209,7 @@ With `BACKEND_URL` empty, the app runs exactly as before: local-only, with no ac
 ## Local development
 
 ```bash
-cd server && npm install && npm run dev      # backend on http://localhost:3000
+cd server && npm install && npm run dev      # backend on http://localhost:3000 (reads server/.env, see .env.example)
 cd server && npm test                        # socket tests against the running backend
 node tests/parser.test.js                    # parser/categorizer tests
 python -m http.server 5173                   # frontend on http://localhost:5173
