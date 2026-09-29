@@ -11,6 +11,6 @@
   var isLocal = ["localhost", "127.0.0.1"].indexOf(location.hostname) !== -1;
 
   window.APP_CONFIG = {
-    BACKEND_URL: isLocal ? "http://localhost:3000" : "",
+    BACKEND_URL: isLocal ? "http://localhost:3000" : "https://shopping-list-server-rgxc.onrender.com",
   };
 })();
