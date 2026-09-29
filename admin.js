@@ -34,7 +34,7 @@
 
   /* ---------- API ---------- */
   class ApiError extends Error {
-    constructor(message, status) { super(message); this.status = status; }
+    constructor(message, status, data) { super(message); this.status = status; this.data = data || {}; }
   }
 
   async function api(path, { method = "GET", body, auth = true } = {}) {
@@ -56,7 +56,7 @@
         showLogin("פג תוקף ההתחברות, התחברו מחדש");
         throw new ApiError(data.error || "unauthorized", 401);
       }
-      if (!res.ok) throw new ApiError(data.error || "HTTP " + res.status, res.status);
+      if (!res.ok) throw new ApiError(data.error || "HTTP " + res.status, res.status, data);
       return data;
     } catch (e) {
       if (e.name === "AbortError") throw new ApiError("השרת לא הגיב", 0);
@@ -171,7 +171,8 @@
     } catch (err) {
       const msg = err.status === 401 ? "אימייל או מפתח שגויים"
         : err.status === 429 ? "יותר מדי ניסיונות. נסו שוב בעוד 15 דקות."
-        : err.status === 503 ? "ממשק הניהול כבוי בשרת (ADMIN_SECRET_KEY לא הוגדר)"
+        : err.data.code === "ADMIN_DISABLED" ? disabledMessage(err.data)
+        : err.status === 503 ? "השרת עדיין עולה. נסו שוב בעוד כמה שניות."
         : err.message;
       setLoginMsg(msg, true);
     } finally {
@@ -182,6 +183,27 @@
 
   function logout() {
     showLogin("");
+  }
+
+  function disabledMessage({ reason, minLength }) {
+    const why = {
+      missing: "המשתנה ADMIN_SECRET_KEY לא מוגדר בשרת",
+      empty: "המשתנה ADMIN_SECRET_KEY מוגדר אבל ריק",
+      too_short: `המפתח ב-ADMIN_SECRET_KEY קצר מ-${minLength || 16} תווים`,
+    }[reason] || "ADMIN_SECRET_KEY לא תקין";
+    return `ממשק הניהול כבוי: ${why}. הגדירו אותו ב-Render → Environment ופרסו מחדש.`;
+  }
+
+  /* Tell the developer up front if the server can't accept admin logins at all. */
+  async function checkAvailability() {
+    try {
+      const res = await fetch(BACKEND_URL + "/api/admin/check", { cache: "no-store" });
+      if (res.status === 404) return; // older server without /check
+      const data = await res.json();
+      if (!data.enabled) setLoginMsg(disabledMessage(data), true);
+    } catch (e) {
+      // Offline or waking up — the login attempt will report it.
+    }
   }
 
   /* ---------- Health ---------- */
@@ -396,5 +418,6 @@
     showDashboard();
   } else {
     showLogin("");
+    checkAvailability();
   }
 })();

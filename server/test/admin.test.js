@@ -26,6 +26,11 @@ const next = (s, ev, ms = 3000) => new Promise((r, j) => { const t = setTimeout(
   assert.equal(bad.data.code, "INVALID_TOKEN");
   assert.equal((await json("/api/me", { headers: { authorization: "Bearer nope" } })).body.code, "INVALID_TOKEN");
 
+  // Public availability check
+  assert.deepEqual((await json("/api/admin/check")).body, { enabled: true, reason: null, minLength: 16 });
+  // Malformed JSON is a 400, not a misleading 503
+  assert.equal((await fetch(URL + "/api/admin/login", { method: "POST", headers: { "content-type": "application/json" }, body: "{bad" })).status, 400);
+
   // Login
   assert.equal((await json("/api/admin/health")).status, 401);
   assert.equal((await json("/api/admin/login", { method: "POST", body: JSON.stringify({ email: ADMIN_EMAIL, secretKey: "wrong" }) })).status, 401);

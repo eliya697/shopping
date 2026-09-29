@@ -9,16 +9,50 @@
  *
  * Tokens are HMAC-signed with ADMIN_SECRET_KEY, so they survive restarts and
  * rotating the key logs every admin session out.
- * If ADMIN_SECRET_KEY is missing (or shorter than 16 chars) the admin API is disabled.
+ * If ADMIN_SECRET_KEY is missing (or shorter than 16 chars) the admin API is disabled:
+ * the rest of the server keeps working, and GET /api/admin/check says why.
+ * There is deliberately no built-in default key.
  */
 
 const crypto = require("crypto");
 const express = require("express");
 const store = require("./db");
 
+const MIN_KEY_LENGTH = 16;
+// ADMIN_SECRET_KEY is the documented name; the others are accepted (with a warning) to survive typos.
+const KEY_NAMES = ["ADMIN_SECRET_KEY", "ADMIN_SECRET", "ADMIN_KEY"];
+
+/*
+ * Reads the admin key, tolerating the usual dashboard copy-paste accidents:
+ * surrounding whitespace/newlines and wrapping quotes. Never returns why in terms
+ * of the value itself — only its length — so it's safe to log.
+ */
+function loadAdminKey(env = process.env) {
+  for (const name of KEY_NAMES) {
+    const raw = env[name];
+    if (raw === undefined) continue;
+    const value = raw.trim().replace(/^(['"])(.*)\1$/s, "$2").trim();
+    const notes = [];
+    if (value !== raw) notes.push("removed surrounding whitespace/quotes");
+    if (name !== KEY_NAMES[0]) notes.push(`read from ${name} — rename it to ${KEY_NAMES[0]}`);
+    const base = { source: name, length: value.length, notes, minLength: MIN_KEY_LENGTH };
+    if (!value) return { ...base, value: "", reason: "empty" };
+    if (value.length < MIN_KEY_LENGTH) return { ...base, value: "", reason: "too_short" };
+    return { ...base, value, reason: null };
+  }
+  return { source: null, length: 0, notes: [], minLength: MIN_KEY_LENGTH, value: "", reason: "missing" };
+}
+
+const REASON_TEXT = {
+  missing: `ADMIN_SECRET_KEY is not set on this server`,
+  empty: `ADMIN_SECRET_KEY is set but empty`,
+  too_short: `ADMIN_SECRET_KEY is shorter than ${MIN_KEY_LENGTH} characters`,
+};
+
+const keyConfig = loadAdminKey();
+const SECRET = keyConfig.value;
+const ENABLED = !keyConfig.reason;
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || "eliyamistriel1234@gmail.com").trim().toLowerCase();
-const SECRET = process.env.ADMIN_SECRET_KEY || "";
-const ENABLED = SECRET.length >= 16;
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const CLEANUP_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 const ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
@@ -28,8 +62,6 @@ const LOGIN_FAILS_MAX = 5;
 const LOGIN_FAILS_WINDOW_MS = 15 * 60 * 1000;
 const loginFails = new Map();
 setInterval(() => loginFails.clear(), LOGIN_FAILS_WINDOW_MS).unref();
-
-if (!ENABLED) console.warn("[admin] ADMIN_SECRET_KEY is not set (or < 16 chars); the admin API is disabled.");
 
 /* Constant-time comparison of two arbitrary strings. */
 function safeEqual(a, b) {
@@ -65,13 +97,27 @@ const handle = (fn) => async (req, res) => {
   }
 };
 
-module.exports = function adminRouter(sockets) {
+function adminRouter(sockets) {
   const router = express.Router();
 
-  router.use((req, res, next) => {
+  router.use((_req, res, next) => {
     res.set("Cache-Control", "no-store");
-    if (!ENABLED) return res.status(503).json({ error: "admin API is disabled on this server", code: "ADMIN_DISABLED" });
     next();
+  });
+
+  /* Public: is the admin API usable here? Reveals only enabled/why, never the key or its length. */
+  router.get("/check", (_req, res) => {
+    res.json({ enabled: ENABLED, reason: keyConfig.reason, minLength: MIN_KEY_LENGTH });
+  });
+
+  router.use((_req, res, next) => {
+    if (ENABLED) return next();
+    res.status(503).json({
+      error: `admin API is disabled: ${REASON_TEXT[keyConfig.reason]}`,
+      code: "ADMIN_DISABLED",
+      reason: keyConfig.reason,
+      minLength: MIN_KEY_LENGTH,
+    });
   });
 
   router.post("/login", (req, res) => {
@@ -81,7 +127,7 @@ module.exports = function adminRouter(sockets) {
       return res.status(429).json({ error: "too many attempts, try again later" });
     }
     const email = String(req.body?.email || "").trim().toLowerCase();
-    const key = String(req.body?.secretKey || "");
+    const key = String(req.body?.secretKey || "").trim();
     // Evaluate both so timing doesn't reveal which one was wrong.
     const emailOk = safeEqual(email, ADMIN_EMAIL);
     const keyOk = safeEqual(key, SECRET);
@@ -165,4 +211,24 @@ module.exports = function adminRouter(sockets) {
   }));
 
   return router;
-};
+}
+
+/* Startup diagnostics for server.js. Safe to log: no key material, only name/length/reason. */
+function describeAdminConfig() {
+  const lines = [];
+  if (ENABLED) {
+    lines.push(`ADMIN_SECRET_KEY: OK (${keyConfig.length} chars, from ${keyConfig.source}) — admin API enabled for ${ADMIN_EMAIL}`);
+  } else {
+    const detail = keyConfig.reason === "too_short"
+      ? ` (got ${keyConfig.length}, need at least ${MIN_KEY_LENGTH})`
+      : "";
+    lines.push(`ADMIN_SECRET_KEY: ${keyConfig.reason.toUpperCase()}${detail} — admin API DISABLED. ` +
+      "Set it in Render → Environment and redeploy.");
+  }
+  keyConfig.notes.forEach((n) => lines.push(`ADMIN_SECRET_KEY: note: ${n}`));
+  return { ok: ENABLED, lines };
+}
+
+module.exports = adminRouter;
+module.exports.describeAdminConfig = describeAdminConfig;
+module.exports.loadAdminKey = loadAdminKey;

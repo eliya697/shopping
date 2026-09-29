@@ -11,6 +11,32 @@ const adminRouter = require("./admin");
 
 const PORT = Number(process.env.PORT) || 3000;
 
+/*
+ * Startup report of the environment this process actually received. Values of
+ * secrets are never printed — only set/missing and length. Variable names are
+ * JSON-quoted so a stray space or typo in a name is visible in the Render logs.
+ */
+function logEnvDiagnostics() {
+  const env = process.env;
+  const secret = (name) => (env[name] ? `set (${env[name].length} chars)` : "MISSING");
+  const lines = [
+    `platform: ${env.RENDER ? "Render" : "local"}${env.RENDER_SERVICE_NAME ? ` (service ${env.RENDER_SERVICE_NAME})` : ""}, node ${process.version}`,
+    `PORT: ${PORT}`,
+    `ALLOWED_ORIGINS: ${env.ALLOWED_ORIGINS || "MISSING (localhost only)"}`,
+    `TURSO_DATABASE_URL: ${env.TURSO_DATABASE_URL
+      ? `set (${env.TURSO_DATABASE_URL.replace(/^(\w+:\/\/[^/?]+).*$/, "$1")})`
+      : "MISSING — using a local SQLite file" + (env.RENDER ? " (DATA WILL BE LOST on Render)" : "")}`,
+    `TURSO_AUTH_TOKEN: ${secret("TURSO_AUTH_TOKEN")}`,
+    ...adminRouter.describeAdminConfig().lines,
+  ];
+  // Near-misses like "ADMIN_SECRET_KEY " or "admin_secret_key" are the usual reason a key "isn't set".
+  const expected = new Set(["ADMIN_SECRET_KEY", "ADMIN_EMAIL", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN"]);
+  const lookalikes = Object.keys(env).filter((k) => /admin|secret|turso/i.test(k) && !expected.has(k));
+  if (lookalikes.length) lines.push(`similar variable names present: ${lookalikes.map((k) => JSON.stringify(k)).join(", ")}`);
+  lines.forEach((l) => console.log(`[env] ${l}`));
+}
+logEnvDiagnostics();
+
 /* ---------- CORS ----------
  * ALLOWED_ORIGINS is a comma-separated list, e.g.
  *   https://eliya697.github.io,http://localhost:5173
@@ -88,6 +114,9 @@ app.use("/api/admin", adminRouter(sockets));
 
 app.use((err, _req, res, _next) => {
   if (err.message?.includes("CORS")) return res.status(403).json({ error: err.message });
+  // Client mistakes (malformed JSON, body too large…) keep their 4xx status.
+  const status = err.status || err.statusCode;
+  if (status >= 400 && status < 500) return res.status(status).json({ error: err.expose ? err.message : "bad request" });
   console.error(err);
   // Most unexpected failures here are the database being unreachable: tell clients to retry.
   res.status(503).json({ error: "server error", code: "SERVER_UNAVAILABLE" });
