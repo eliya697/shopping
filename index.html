@@ -35,6 +35,21 @@
       </div>
     </div>
     <p class="subtitle" id="subtitle">הרשימה ריקה</p>
+
+    <div class="account-row hidden" id="accountRow">
+      <button class="enable-sync-btn hidden" id="enableSyncBtn">☁️ הפעלת סנכרון ושיתוף</button>
+
+      <div class="id-badge hidden" id="idBadge">
+        <span class="sync-dot" id="syncDot" title="לא מחובר"></span>
+        <span class="id-label">ID</span>
+        <code id="userIdShort" dir="ltr"></code>
+        <button class="id-copy-btn" id="copyIdBtn" aria-label="העתק מזהה משתמש" title="העתק מזהה">📋 העתק</button>
+      </div>
+
+      <button class="members-pill hidden" id="membersBtn" aria-label="שיתוף ומשתתפים">
+        👥 <span id="membersText">שיתוף</span>
+      </button>
+    </div>
   </header>
 
   <div class="search-row">
@@ -95,9 +110,130 @@
     </div>
   </div>
 
-  <div class="toast hidden" id="toast"></div>
+  <!-- Share / account Modal -->
+  <div class="modal-overlay hidden" id="accountOverlay">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2>שיתוף וחשבון</h2>
+        <button class="icon-btn" id="closeAccountBtn" aria-label="סגור">✕</button>
+      </div>
+      <div class="modal-body">
+
+        <section class="acc-section">
+          <h3>החשבון שלי</h3>
+          <div class="acc-card">
+            <div class="acc-field-row">
+              <input type="text" id="usernameInput" maxlength="30" placeholder="השם שלך" autocomplete="off">
+              <button class="small-btn" id="saveUsernameBtn">שמור</button>
+            </div>
+            <div class="acc-label">מזהה המשתמש שלך (תנו אותו למי שרוצה לשתף איתך רשימה)</div>
+            <div class="acc-id-row">
+              <code class="acc-id" id="fullUserId" dir="ltr"></code>
+              <button class="small-btn" id="copyFullIdBtn">📋 העתק</button>
+            </div>
+            <div class="acc-status" id="syncStatusText"></div>
+          </div>
+        </section>
+
+        <section class="acc-section" id="shareSection">
+          <h3>שיתוף הרשימה</h3>
+          <div class="acc-card">
+            <div class="acc-label">הדביקו את מזהה המשתמש של מי שתרצו לשתף איתו</div>
+            <div class="acc-field-row">
+              <input type="text" id="shareUserIdInput" placeholder="מזהה משתמש" dir="ltr" autocomplete="off" spellcheck="false">
+              <button class="small-btn primary" id="shareBtn">שתף</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="acc-section" id="sharedWithMeSection">
+          <h3>רשימה משותפת</h3>
+          <div class="acc-card">
+            <div class="acc-label" id="sharedByText"></div>
+            <button class="small-btn danger" id="leaveListBtn">עזיבת הרשימה</button>
+          </div>
+        </section>
+
+        <section class="acc-section">
+          <h3 id="membersTitle">משתתפים</h3>
+          <div class="acc-list" id="membersList"></div>
+        </section>
+
+        <section class="acc-section" id="listsSection">
+          <h3>הרשימות שלי</h3>
+          <div class="acc-list" id="listsList"></div>
+        </section>
+
+        <section class="acc-section">
+          <h3>מכשיר נוסף</h3>
+          <div class="acc-card">
+            <div class="acc-label">כדי לפתוח את אותו חשבון בטלפון או במחשב נוסף, העתיקו את קוד החיבור והזינו אותו שם.
+              <strong>אל תשתפו את הקוד</strong> — הוא כמו סיסמה. לשיתוף רשימה משתמשים במזהה המשתמש בלבד.</div>
+            <div class="acc-id-row hidden" id="linkCodeRow">
+              <code class="acc-id" id="linkCode" dir="ltr"></code>
+              <button class="small-btn" id="copyLinkCodeBtn">📋 העתק</button>
+            </div>
+            <div class="acc-actions">
+              <button class="small-btn" id="showLinkCodeBtn">הצג קוד חיבור</button>
+              <button class="small-btn danger" id="logoutBtn">התנתקות מהמכשיר</button>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Welcome / sign-up Modal -->
+  <div class="modal-overlay hidden" id="welcomeOverlay">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2>☁️ סנכרון ושיתוף</h2>
+        <button class="icon-btn" id="closeWelcomeBtn" aria-label="סגור">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="welcome-text" id="welcomeText">צרו חשבון כדי לסנכרן את הרשימה בין מכשירים ולשתף אותה בזמן אמת עם בני הבית. הפריטים שכבר ברשימה יישמרו.</p>
+
+        <div id="registerPanel">
+          <div class="acc-field-row">
+            <input type="text" id="welcomeNameInput" maxlength="30" placeholder="איך לקרוא לך?" autocomplete="off">
+            <button class="small-btn primary" id="registerBtn">יצירת חשבון</button>
+          </div>
+          <button class="link-btn" id="showLinkPanelBtn">כבר יש לי חשבון במכשיר אחר</button>
+        </div>
+
+        <div id="linkPanel" class="hidden">
+          <div class="acc-label">הזינו את קוד החיבור מהמכשיר השני (שיתוף וחשבון ← מכשיר נוסף)</div>
+          <div class="acc-field-row">
+            <input type="text" id="linkCodeInput" placeholder="קוד חיבור" dir="ltr" autocomplete="off" spellcheck="false">
+            <button class="small-btn primary" id="linkDeviceBtn">התחבר</button>
+          </div>
+          <button class="link-btn" id="showRegisterPanelBtn">חזרה ליצירת חשבון</button>
+        </div>
+
+        <div class="welcome-status hidden" id="welcomeStatus"></div>
+        <button class="link-btn muted" id="skipWelcomeBtn">אולי אחר כך</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- PWA update banner -->
+  <div class="update-banner hidden" id="updateBanner" role="status">
+    <span>🚀 גרסה חדשה זמינה!</span>
+    <button class="update-now-btn" id="updateNowBtn">עדכן עכשיו</button>
+    <button class="update-dismiss-btn" id="updateDismissBtn" aria-label="לא עכשיו">✕</button>
+  </div>
+
+  <div class="toast hidden" id="toast">
+    <span id="toastText"></span>
+    <button class="toast-action hidden" id="toastAction"></button>
+  </div>
 
 </div>
+<script src="config.js"></script>
+<script src="vendor/socket.io.min.js"></script>
+<script src="socket-client.js"></script>
+<script src="pwa-update.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

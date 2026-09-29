@@ -3,10 +3,17 @@
 
   /* ---------- Constants ---------- */
   const STORAGE_KEYS = {
-    items: "shoppingList.items.v1",
+    items: "shoppingList.items.v1", // local-only mode (no account)
     templates: "shoppingList.templates.v1",
     theme: "shoppingList.theme.v1",
+    account: "shoppingList.account.v1",
+    activeList: "shoppingList.activeList.v1",
+    lists: "shoppingList.lists.v1",
+    listCachePrefix: "shoppingList.listCache.v1.", // + listId -> { list, items }
+    welcomeSeen: "shoppingList.welcomeSeen.v1",
   };
+
+  const BACKEND_URL = ((window.APP_CONFIG && window.APP_CONFIG.BACKEND_URL) || "").replace(/\/+$/, "");
 
   const CATEGORIES = [
     { key: "produce", label: "ירקות ופירות", emoji: "🥦" },
@@ -39,33 +46,70 @@
     ],
   };
 
+  const STATUS_TEXT = {
+    online: "מחובר — שינויים מסתנכרנים בזמן אמת",
+    connecting: "מתחבר לשרת…",
+    waking: "השרת מתעורר (יכול לקחת עד דקה)…",
+    offline: "לא מחובר — השינויים יישמרו ויסתנכרנו כשהחיבור יחזור",
+  };
+
   /* ---------- State ---------- */
   let items = [];
   let templates = {};
   let activeFilter = "all";
   let searchQuery = "";
 
+  let account = null; // { userId, username, token }
+  let lists = []; // lists I'm a member of: { listId, ownerId, ownerName, memberCount }
+  let activeListId = null;
+  let listInfo = null; // { listId, ownerId, members: [{ userId, username }] }
+  let sync = null;
+  let syncStatus = "offline";
+  const flashIds = new Set(); // rows to highlight after a remote add
+
   /* ---------- Storage ---------- */
-  function loadState() {
+  function readJSON(key, fallback) {
     try {
-      const rawItems = localStorage.getItem(STORAGE_KEYS.items);
-      items = rawItems ? JSON.parse(rawItems) : [];
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : fallback;
     } catch (e) {
-      items = [];
+      return fallback;
     }
-    try {
-      const rawTemplates = localStorage.getItem(STORAGE_KEYS.templates);
-      templates = rawTemplates ? JSON.parse(rawTemplates) : { ...DEFAULT_TEMPLATE };
-    } catch (e) {
-      templates = { ...DEFAULT_TEMPLATE };
+  }
+  function writeJSON(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+  }
+  function removeKey(key) {
+    try { localStorage.removeItem(key); } catch (e) {}
+  }
+
+  function loadState() {
+    templates = readJSON(STORAGE_KEYS.templates, null) || { ...DEFAULT_TEMPLATE };
+    account = BACKEND_URL ? readJSON(STORAGE_KEYS.account, null) : null;
+    if (account) {
+      lists = readJSON(STORAGE_KEYS.lists, []);
+      activeListId = readJSON(STORAGE_KEYS.activeList, null) || (lists[0] && lists[0].listId);
+      loadListCache(activeListId);
+    } else {
+      items = readJSON(STORAGE_KEYS.items, []);
     }
   }
 
+  function loadListCache(listId) {
+    const cached = listId ? readJSON(STORAGE_KEYS.listCachePrefix + listId, null) : null;
+    items = (cached && cached.items) || [];
+    listInfo = (cached && cached.list) || null;
+  }
+
   function saveItems() {
-    try { localStorage.setItem(STORAGE_KEYS.items, JSON.stringify(items)); } catch (e) {}
+    if (account && activeListId) {
+      writeJSON(STORAGE_KEYS.listCachePrefix + activeListId, { list: listInfo, items });
+    } else {
+      writeJSON(STORAGE_KEYS.items, items);
+    }
   }
   function saveTemplates() {
-    try { localStorage.setItem(STORAGE_KEYS.templates, JSON.stringify(templates)); } catch (e) {}
+    writeJSON(STORAGE_KEYS.templates, templates);
   }
 
   function uid() {
@@ -99,14 +143,80 @@
   const confirmOkBtn = el("confirmOkBtn");
   const confirmCancelBtn = el("confirmCancelBtn");
   const toast = el("toast");
+  const toastText = el("toastText");
+  const toastAction = el("toastAction");
+
+  const accountRow = el("accountRow");
+  const enableSyncBtn = el("enableSyncBtn");
+  const idBadge = el("idBadge");
+  const syncDot = el("syncDot");
+  const userIdShort = el("userIdShort");
+  const copyIdBtn = el("copyIdBtn");
+  const membersBtn = el("membersBtn");
+  const membersText = el("membersText");
+
+  const accountOverlay = el("accountOverlay");
+  const closeAccountBtn = el("closeAccountBtn");
+  const usernameInput = el("usernameInput");
+  const saveUsernameBtn = el("saveUsernameBtn");
+  const fullUserId = el("fullUserId");
+  const copyFullIdBtn = el("copyFullIdBtn");
+  const syncStatusText = el("syncStatusText");
+  const shareSection = el("shareSection");
+  const shareUserIdInput = el("shareUserIdInput");
+  const shareBtn = el("shareBtn");
+  const sharedWithMeSection = el("sharedWithMeSection");
+  const sharedByText = el("sharedByText");
+  const leaveListBtn = el("leaveListBtn");
+  const membersTitle = el("membersTitle");
+  const membersList = el("membersList");
+  const listsSection = el("listsSection");
+  const listsList = el("listsList");
+  const linkCodeRow = el("linkCodeRow");
+  const linkCode = el("linkCode");
+  const copyLinkCodeBtn = el("copyLinkCodeBtn");
+  const showLinkCodeBtn = el("showLinkCodeBtn");
+  const logoutBtn = el("logoutBtn");
+
+  const welcomeOverlay = el("welcomeOverlay");
+  const closeWelcomeBtn = el("closeWelcomeBtn");
+  const welcomeText = el("welcomeText");
+  const registerPanel = el("registerPanel");
+  const linkPanel = el("linkPanel");
+  const welcomeNameInput = el("welcomeNameInput");
+  const registerBtn = el("registerBtn");
+  const showLinkPanelBtn = el("showLinkPanelBtn");
+  const showRegisterPanelBtn = el("showRegisterPanelBtn");
+  const linkCodeInput = el("linkCodeInput");
+  const linkDeviceBtn = el("linkDeviceBtn");
+  const welcomeStatus = el("welcomeStatus");
+  const skipWelcomeBtn = el("skipWelcomeBtn");
 
   /* ---------- Toast ---------- */
   let toastTimer = null;
-  function showToast(msg, ms = 2200) {
-    toast.textContent = msg;
+  let toastActionFn = null;
+  function showToast(msg, ms = 2200, action = null) {
+    toastText.textContent = msg;
+    toastActionFn = action ? action.fn : null;
+    toastAction.textContent = action ? action.label : "";
+    toastAction.classList.toggle("hidden", !action);
     toast.classList.remove("hidden");
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => toast.classList.add("hidden"), ms);
+  }
+  toastAction.addEventListener("click", () => {
+    const fn = toastActionFn;
+    toast.classList.add("hidden");
+    if (fn) fn();
+  });
+
+  async function copyText(text, okMsg) {
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast(okMsg);
+    } catch (e) {
+      showToast("ההעתקה נכשלה — סמנו והעתיקו ידנית");
+    }
   }
 
   /* ---------- Confirm modal ---------- */
@@ -161,23 +271,112 @@
     return "misc";
   }
 
+  /* ---------- Operations ----------
+   * Every change — a local tap or a socket event — is an "op" applied by
+   * applyOp(). Local ops are additionally queued to the server by commit().
+   */
+  function applyOp(op) {
+    switch (op.type) {
+      case "add": {
+        const idx = items.findIndex((i) => i.id === op.item.id);
+        if (idx >= 0) items[idx] = { ...items[idx], ...op.item };
+        else items.push(op.item);
+        break;
+      }
+      case "toggle": {
+        const item = items.find((i) => i.id === op.id);
+        if (item) item.bought = op.bought;
+        break;
+      }
+      case "qty": {
+        const item = items.find((i) => i.id === op.id);
+        if (item) item.qty = op.qty;
+        break;
+      }
+      case "delete":
+        items = items.filter((i) => i.id !== op.id);
+        break;
+      case "remove": {
+        const ids = new Set(op.ids);
+        items = items.filter((i) => !ids.has(i.id));
+        break;
+      }
+      case "clearBought":
+        items = items.filter((i) => !i.bought);
+        break;
+      case "reset":
+        items = [];
+        break;
+    }
+  }
+
+  function toWire(op, listId) {
+    switch (op.type) {
+      case "add":
+        return ["item:add", { listId, item: { itemId: op.item.id, text: op.item.name, category: op.item.category, qty: op.item.qty } }];
+      case "toggle":
+        return ["item:toggle", { listId, itemId: op.id, isCompleted: op.bought }];
+      case "qty":
+        return ["item:update_qty", { listId, itemId: op.id, qty: op.qty }];
+      case "delete":
+        return ["item:delete", { listId, itemId: op.id }];
+      case "clearBought":
+        return ["item:clear_completed", { listId }];
+      case "reset":
+        return ["list:reset", { listId }];
+    }
+    return null;
+  }
+
+  /* Local user action: apply optimistically, persist, render, and queue for the server. */
+  function commit(op) {
+    applyOp(op);
+    saveItems();
+    render();
+    if (sync && activeListId) {
+      const wire = toWire(op, activeListId);
+      if (wire) sync.send(wire[0], wire[1], op);
+    }
+  }
+
+  function fromServerItem(s) {
+    return {
+      id: s.itemId,
+      name: s.text,
+      category: s.category,
+      bought: !!s.isCompleted,
+      qty: s.qty || 1,
+      createdAt: s.createdAt,
+      addedBy: s.addedBy,
+    };
+  }
+
   /* ---------- Rendering: filter chips ---------- */
-  function renderFilterRow() {
+  const chipEls = new Map();
+  function buildFilterRow() {
     const chips = [{ key: "all", label: "הכל", emoji: "📋" }, ...CATEGORIES];
-    filterRow.innerHTML = "";
     chips.forEach((c) => {
       const btn = document.createElement("button");
-      btn.className = "chip" + (activeFilter === c.key ? " active" : "");
+      btn.className = "chip";
       btn.textContent = `${c.emoji} ${c.label}`;
       btn.addEventListener("click", () => {
         activeFilter = activeFilter === c.key ? "all" : c.key;
         render();
       });
+      chipEls.set(c.key, btn);
       filterRow.appendChild(btn);
     });
   }
+  function updateFilterRow() {
+    chipEls.forEach((btn, key) => btn.classList.toggle("active", key === activeFilter));
+  }
 
-  /* ---------- Rendering: list ---------- */
+  /* ---------- Rendering: list (keyed, patches the DOM in place) ---------- */
+  const rowRefs = new Map(); // item id -> { row, content, circle, nameEl, badge, qtyVal }
+  const boughtLabel = document.createElement("div");
+  boughtLabel.className = "section-label";
+  boughtLabel.textContent = "נקנו";
+
   function getVisibleItems() {
     let visible = items;
     if (activeFilter !== "all") visible = visible.filter((i) => i.category === activeFilter);
@@ -190,20 +389,19 @@
     return [...unbought, ...bought];
   }
 
+  function memberName(userId) {
+    const m = listInfo && listInfo.members.find((x) => x.userId === userId);
+    return m ? m.username : null;
+  }
+
   function render() {
-    renderFilterRow();
+    updateFilterRow();
 
     const visible = getVisibleItems();
-    listContainer.innerHTML = "";
-
     const totalCount = items.length;
     const remaining = items.filter((i) => !i.bought).length;
     const boughtCount = totalCount - remaining;
-    if (totalCount === 0) {
-      subtitle.textContent = "הרשימה ריקה";
-    } else {
-      subtitle.textContent = `${remaining} מתוך ${totalCount} נותרו לקנייה`;
-    }
+    subtitle.textContent = totalCount === 0 ? "הרשימה ריקה" : `${remaining} מתוך ${totalCount} נותרו לקנייה`;
 
     if (boughtCount > 0) {
       boughtBarText.textContent = `✓ ${boughtCount} פריטים נקנו`;
@@ -212,35 +410,85 @@
       boughtBar.classList.add("hidden");
     }
 
-    if (visible.length === 0) {
-      emptyState.classList.remove("hidden");
+    const desired = [];
+    let labelShown = false;
+    visible.forEach((item) => {
+      if (item.bought && !labelShown) {
+        desired.push(boughtLabel);
+        labelShown = true;
+      }
+      desired.push(upsertRow(item).row);
+    });
+
+    // Drop rows that are no longer visible; animate only real deletions.
+    const keep = new Set(desired);
+    const existingIds = new Set(items.map((i) => i.id));
+    rowRefs.forEach((ref, id) => {
+      if (keep.has(ref.row)) return;
+      rowRefs.delete(id);
+      if (existingIds.has(id)) ref.row.remove();
+      else retireRow(ref.row);
+    });
+    if (!labelShown) boughtLabel.remove();
+
+    // Put nodes in order, moving only the ones that are out of place.
+    let cursor = listContainer.firstChild;
+    desired.forEach((node) => {
+      while (cursor && cursor.classList.contains("removing")) cursor = cursor.nextSibling;
+      if (cursor === node) cursor = node.nextSibling;
+      else listContainer.insertBefore(node, cursor);
+    });
+
+    flashIds.forEach((id) => {
+      const ref = rowRefs.get(id);
+      if (!ref) return;
+      ref.content.classList.remove("pulse-remote");
+      void ref.content.offsetWidth;
+      ref.content.classList.add("pulse-remote");
+    });
+    flashIds.clear();
+
+    const isEmpty = visible.length === 0;
+    emptyState.classList.toggle("hidden", !isEmpty);
+    listContainer.classList.toggle("hidden", isEmpty);
+    if (isEmpty) {
       emptyState.querySelector("p").textContent = totalCount === 0 ? "הרשימה ריקה" : "לא נמצאו פריטים";
       emptyState.querySelector("span").textContent = totalCount === 0 ? "הוסיפו פריט ראשון בתחתית המסך" : "נסו לשנות את החיפוש או הסינון";
-      listContainer.classList.add("hidden");
-      return;
     }
-    emptyState.classList.add("hidden");
-    listContainer.classList.remove("hidden");
-
-    let lastBoughtHeaderShown = false;
-    visible.forEach((item) => {
-      if (item.bought && !lastBoughtHeaderShown) {
-        const label = document.createElement("div");
-        label.className = "section-label";
-        label.textContent = "נקנו";
-        listContainer.appendChild(label);
-        lastBoughtHeaderShown = true;
-      }
-      listContainer.appendChild(buildItemRow(item));
-    });
   }
 
-  function buildItemRow(item) {
-    const cat = CAT_MAP[item.category] || CAT_MAP.misc;
+  function retireRow(row) {
+    row.style.maxHeight = row.offsetHeight + "px";
+    void row.offsetHeight; // commit the start height so the collapse animates
+    row.classList.add("removing");
+    row.style.maxHeight = "0px";
+    setTimeout(() => row.remove(), 260);
+  }
 
+  function upsertRow(item) {
+    let ref = rowRefs.get(item.id);
+    if (!ref) {
+      ref = buildItemRow(item.id);
+      rowRefs.set(item.id, ref);
+    }
+    const cat = CAT_MAP[item.category] || CAT_MAP.misc;
+    const shared = listInfo && listInfo.members.length > 1;
+    const adder = shared && item.addedBy && account && item.addedBy !== account.userId ? memberName(item.addedBy) : null;
+
+    ref.circle.classList.toggle("checked", !!item.bought);
+    ref.nameEl.classList.toggle("bought", !!item.bought);
+    if (ref.nameEl.textContent !== item.name) ref.nameEl.textContent = item.name;
+    const badgeText = `${cat.emoji} ${cat.label}` + (adder ? ` · ${adder}` : "");
+    if (ref.badge.textContent !== badgeText) ref.badge.textContent = badgeText;
+    const qty = String(item.qty || 1);
+    if (ref.qtyVal.textContent !== qty) ref.qtyVal.textContent = qty;
+    return ref;
+  }
+
+  function buildItemRow(id) {
     const row = document.createElement("div");
     row.className = "item-row";
-    row.dataset.id = item.id;
+    row.dataset.id = id;
 
     const deleteAction = document.createElement("div");
     deleteAction.className = "item-delete-action";
@@ -250,19 +498,17 @@
     content.className = "item-content";
 
     const circle = document.createElement("button");
-    circle.className = "check-circle" + (item.bought ? " checked" : "");
+    circle.className = "check-circle";
     circle.textContent = "✓";
     circle.setAttribute("aria-label", "סמן כנקנה");
-    circle.addEventListener("click", () => toggleBought(item.id));
+    circle.addEventListener("click", () => toggleBought(id));
 
     const main = document.createElement("div");
     main.className = "item-main";
     const nameEl = document.createElement("div");
-    nameEl.className = "item-name" + (item.bought ? " bought" : "");
-    nameEl.textContent = item.name;
+    nameEl.className = "item-name";
     const badge = document.createElement("div");
     badge.className = "item-cat-badge";
-    badge.textContent = `${cat.emoji} ${cat.label}`;
     main.appendChild(nameEl);
     main.appendChild(badge);
 
@@ -271,14 +517,13 @@
     const minusBtn = document.createElement("button");
     minusBtn.className = "qty-btn";
     minusBtn.textContent = "–";
-    minusBtn.addEventListener("click", (e) => { e.stopPropagation(); changeQty(item.id, -1); });
+    minusBtn.addEventListener("click", (e) => { e.stopPropagation(); changeQty(id, -1); });
     const qtyVal = document.createElement("span");
     qtyVal.className = "qty-val";
-    qtyVal.textContent = item.qty || 1;
     const plusBtn = document.createElement("button");
     plusBtn.className = "qty-btn";
     plusBtn.textContent = "+";
-    plusBtn.addEventListener("click", (e) => { e.stopPropagation(); changeQty(item.id, 1); });
+    plusBtn.addEventListener("click", (e) => { e.stopPropagation(); changeQty(id, 1); });
     qtyControl.appendChild(minusBtn);
     qtyControl.appendChild(qtyVal);
     qtyControl.appendChild(plusBtn);
@@ -290,12 +535,12 @@
     row.appendChild(deleteAction);
     row.appendChild(content);
 
-    attachSwipeToDelete(content, row, item.id);
-    return row;
+    attachSwipeToDelete(content, id);
+    return { row, content, circle, nameEl, badge, qtyVal };
   }
 
   /* ---------- Swipe to delete ---------- */
-  function attachSwipeToDelete(content, row, id) {
+  function attachSwipeToDelete(content, id) {
     let startX = 0;
     let currentX = 0;
     let dragging = false;
@@ -332,6 +577,18 @@
   }
 
   /* ---------- Actions ---------- */
+  function newItem(name, category) {
+    return {
+      id: uid(),
+      name,
+      category,
+      bought: false,
+      qty: 1,
+      createdAt: Date.now(),
+      addedBy: account ? account.userId : undefined,
+    };
+  }
+
   function addItem() {
     const rawName = newItemInput.value.trim();
     if (!rawName) return;
@@ -351,49 +608,25 @@
       return;
     }
 
-    items.push({
-      id: uid(),
-      name: rawName,
-      category,
-      bought: false,
-      qty: 1,
-      createdAt: Date.now(),
-    });
-    saveItems();
     newItemInput.value = "";
-    render();
+    commit({ type: "add", item: newItem(rawName, category) });
   }
 
   function toggleBought(id) {
     const item = items.find((i) => i.id === id);
     if (!item) return;
-    item.bought = !item.bought;
-    saveItems();
-    render();
+    commit({ type: "toggle", id, bought: !item.bought });
   }
 
   function changeQty(id, delta) {
     const item = items.find((i) => i.id === id);
     if (!item) return;
-    item.qty = Math.min(99, Math.max(1, (item.qty || 1) + delta));
-    saveItems();
-    render();
+    const qty = Math.min(99, Math.max(1, (item.qty || 1) + delta));
+    if (qty !== item.qty) commit({ type: "qty", id, qty });
   }
 
   function deleteItem(id) {
-    const rowEl = listContainer.querySelector(`[data-id="${id}"]`);
-    if (rowEl) {
-      rowEl.classList.add("removing");
-      setTimeout(() => {
-        items = items.filter((i) => i.id !== id);
-        saveItems();
-        render();
-      }, 220);
-    } else {
-      items = items.filter((i) => i.id !== id);
-      saveItems();
-      render();
-    }
+    commit({ type: "delete", id });
   }
 
   function clearBought() {
@@ -402,9 +635,7 @@
       return;
     }
     showConfirm("למחוק את כל הפריטים שנקנו?", () => {
-      items = items.filter((i) => !i.bought);
-      saveItems();
-      render();
+      commit({ type: "clearBought" });
       showToast("הפריטים שנקנו נמחקו");
     });
   }
@@ -414,10 +645,11 @@
       showToast("הרשימה כבר ריקה");
       return;
     }
-    showConfirm("לאפס את כל הרשימה? הפעולה לא ניתנת לביטול.", () => {
-      items = [];
-      saveItems();
-      render();
+    const msg = isSharedList()
+      ? "לאפס את כל הרשימה? היא תתאפס גם אצל כל המשתתפים."
+      : "לאפס את כל הרשימה? הפעולה לא ניתנת לביטול.";
+    showConfirm(msg, () => {
+      commit({ type: "reset" });
       showToast("הרשימה אופסה");
     });
   }
@@ -500,21 +732,522 @@
         (i) => !i.bought && i.name.trim().toLowerCase() === ti.name.trim().toLowerCase()
       );
       if (!exists) {
-        items.push({
-          id: uid(),
-          name: ti.name,
-          category: ti.category,
-          bought: false,
-          qty: 1,
-          createdAt: Date.now(),
-        });
+        commit({ type: "add", item: newItem(ti.name, ti.category) });
         addedCount++;
       }
     });
-    saveItems();
-    render();
     templatesOverlay.classList.add("hidden");
     showToast(addedCount > 0 ? `${addedCount} פריטים נוספו מהתבנית` : "כל הפריטים כבר ברשימה");
+  }
+
+  /* ================================================================
+   * Accounts, sharing & real-time sync
+   * ================================================================ */
+  function ownListId() {
+    const own = lists.find((l) => account && l.ownerId === account.userId);
+    return own ? own.listId : lists[0] && lists[0].listId;
+  }
+  function activeListMeta() {
+    return lists.find((l) => l.listId === activeListId) || null;
+  }
+  function isOwnList() {
+    const meta = activeListMeta();
+    const ownerId = (listInfo && listInfo.ownerId) || (meta && meta.ownerId);
+    return !!account && ownerId === account.userId;
+  }
+  function isSharedList() {
+    const meta = activeListMeta();
+    const count = listInfo ? listInfo.members.length : meta ? meta.memberCount : 1;
+    return count > 1;
+  }
+
+  function saveLists() {
+    writeJSON(STORAGE_KEYS.lists, lists);
+  }
+
+  function setActiveList(listId) {
+    activeListId = listId;
+    writeJSON(STORAGE_KEYS.activeList, listId);
+  }
+
+  function switchList(listId) {
+    if (!listId) return;
+    if (listId !== activeListId) {
+      setActiveList(listId);
+      loadListCache(listId);
+      rowRefs.forEach((ref) => ref.row.remove());
+      rowRefs.clear();
+      render();
+    }
+    if (sync) sync.setActiveList(listId);
+    renderAccountUI();
+  }
+
+  /* ---------- Header badge ---------- */
+  function renderAccountUI() {
+    accountRow.classList.toggle("hidden", !BACKEND_URL);
+    if (!BACKEND_URL) return;
+
+    enableSyncBtn.classList.toggle("hidden", !!account);
+    idBadge.classList.toggle("hidden", !account);
+    membersBtn.classList.toggle("hidden", !account);
+    if (!account) return;
+
+    userIdShort.textContent = account.userId.slice(0, 8) + "…";
+    syncDot.className = "sync-dot " + syncStatus;
+    syncDot.title = STATUS_TEXT[syncStatus];
+
+    const meta = activeListMeta();
+    const memberCount = listInfo ? listInfo.members.length : meta ? meta.memberCount : 1;
+    if (!isOwnList()) {
+      const ownerName = (meta && meta.ownerName) || (listInfo && memberName(listInfo.ownerId)) || "";
+      membersText.textContent = `הרשימה של ${ownerName}`;
+    } else if (memberCount > 1) {
+      membersText.textContent = `משותף עם ${memberCount - 1}`;
+      membersBtn.title = memberCount === 2 ? "משותף עם משתמש 1" : `משותף עם ${memberCount - 1} משתמשים`;
+    } else {
+      membersText.textContent = "שיתוף";
+    }
+
+    if (!accountOverlay.classList.contains("hidden")) renderAccountModal();
+  }
+
+  /* ---------- Share / account modal ---------- */
+  function renderAccountModal() {
+    if (!account) return;
+    if (document.activeElement !== usernameInput) usernameInput.value = account.username;
+    fullUserId.textContent = account.userId;
+    syncStatusText.innerHTML = "";
+    const dot = document.createElement("span");
+    dot.className = "sync-dot " + syncStatus;
+    syncStatusText.appendChild(dot);
+    syncStatusText.appendChild(document.createTextNode(STATUS_TEXT[syncStatus]));
+
+    const own = isOwnList();
+    const meta = activeListMeta();
+    shareSection.classList.toggle("hidden", !own);
+    sharedWithMeSection.classList.toggle("hidden", own);
+    if (!own) {
+      const ownerName = (meta && meta.ownerName) || (listInfo && memberName(listInfo.ownerId)) || "";
+      sharedByText.textContent = `את הרשימה הזו שיתף/ה איתך ${ownerName}. שינויים שתעשו יופיעו אצל כל המשתתפים.`;
+    }
+
+    // Members
+    membersList.innerHTML = "";
+    const members = listInfo ? listInfo.members : [];
+    membersTitle.textContent = `משתתפים ברשימה (${members.length || 1})`;
+    members.forEach((m) => {
+      const row = document.createElement("div");
+      row.className = "acc-row";
+      const main = document.createElement("div");
+      main.className = "acc-row-main";
+      const title = document.createElement("div");
+      title.className = "acc-row-title";
+      title.textContent = m.username + (m.userId === account.userId ? " (את/ה)" : "");
+      const sub = document.createElement("div");
+      sub.className = "acc-row-sub";
+      sub.dir = "ltr";
+      sub.textContent = m.userId.slice(0, 8) + "…";
+      main.appendChild(title);
+      main.appendChild(sub);
+      row.appendChild(main);
+      if (listInfo && m.userId === listInfo.ownerId) {
+        const tag = document.createElement("span");
+        tag.className = "acc-tag";
+        tag.textContent = "בעלים";
+        row.appendChild(tag);
+      } else if (own) {
+        const rm = document.createElement("button");
+        rm.className = "acc-remove";
+        rm.textContent = "✕";
+        rm.setAttribute("aria-label", `הסר את ${m.username}`);
+        rm.addEventListener("click", () => {
+          showConfirm(`להסיר את ${m.username} מהרשימה?`, () => removeMember(m.userId));
+        });
+        row.appendChild(rm);
+      }
+      membersList.appendChild(row);
+    });
+    if (!members.length) {
+      const empty = document.createElement("div");
+      empty.className = "templates-empty";
+      empty.textContent = "הפרטים ייטענו כשהחיבור לשרת יתחדש";
+      membersList.appendChild(empty);
+    }
+
+    // Lists switcher (only useful once something was shared with me)
+    listsSection.classList.toggle("hidden", lists.length < 2);
+    listsList.innerHTML = "";
+    lists.forEach((l) => {
+      const btn = document.createElement("button");
+      btn.className = "acc-row" + (l.listId === activeListId ? " active" : "");
+      const main = document.createElement("div");
+      main.className = "acc-row-main";
+      const title = document.createElement("div");
+      title.className = "acc-row-title";
+      title.textContent = l.ownerId === account.userId ? "הרשימה שלי" : `הרשימה של ${l.ownerName}`;
+      const sub = document.createElement("div");
+      sub.className = "acc-row-sub";
+      sub.textContent = l.memberCount > 1 ? `${l.memberCount} משתתפים` : "רק את/ה";
+      main.appendChild(title);
+      main.appendChild(sub);
+      btn.appendChild(main);
+      if (l.listId === activeListId) {
+        const tag = document.createElement("span");
+        tag.className = "acc-tag";
+        tag.textContent = "פעילה";
+        btn.appendChild(tag);
+      }
+      btn.addEventListener("click", () => {
+        switchList(l.listId);
+        accountOverlay.classList.add("hidden");
+      });
+      listsList.appendChild(btn);
+    });
+  }
+
+  function openAccountModal() {
+    linkCodeRow.classList.add("hidden");
+    showLinkCodeBtn.classList.remove("hidden");
+    renderAccountModal();
+    accountOverlay.classList.remove("hidden");
+  }
+
+  async function shareList() {
+    const targetUserId = shareUserIdInput.value.trim();
+    if (!targetUserId) {
+      showToast("הדביקו מזהה משתמש");
+      return;
+    }
+    if (targetUserId === account.userId) {
+      showToast("זה המזהה שלך 🙂");
+      return;
+    }
+    shareBtn.disabled = true;
+    const res = await sync.request("share:list", { listId: activeListId, targetUserId });
+    shareBtn.disabled = false;
+    if (res.ok) {
+      shareUserIdInput.value = "";
+      showToast(`הרשימה שותפה עם ${res.member.username} ✓`);
+      return;
+    }
+    const errors = {
+      offline: "אין חיבור לשרת כרגע, נסו שוב בעוד רגע",
+      timeout: "השרת לא הגיב, נסו שוב",
+      "user not found": "לא נמצא משתמש עם המזהה הזה",
+      "already shared with this user": "הרשימה כבר משותפת עם המשתמש הזה",
+    };
+    showToast(errors[res.error] || "השיתוף נכשל");
+  }
+
+  async function removeMember(userId) {
+    const res = await sync.request("list:remove_member", { listId: activeListId, userId });
+    if (!res.ok) showToast(res.error === "offline" ? "אין חיבור לשרת כרגע" : "הפעולה נכשלה");
+  }
+
+  function leaveList() {
+    showConfirm("לעזוב את הרשימה המשותפת? לא תוכלו לראות אותה יותר.", async () => {
+      const listId = activeListId;
+      const res = await sync.request("list:remove_member", { listId, userId: account.userId });
+      if (!res.ok) {
+        showToast(res.error === "offline" ? "אין חיבור לשרת כרגע" : "הפעולה נכשלה");
+        return;
+      }
+      accountOverlay.classList.add("hidden");
+      // list:removed will also arrive; switching here makes it feel instant.
+      forgetList(listId);
+      switchList(ownListId());
+      showToast("עזבת את הרשימה");
+    });
+  }
+
+  async function saveUsername() {
+    const username = usernameInput.value.trim();
+    if (!username || username === account.username) return;
+    const res = await sync.request("user:rename", { username });
+    if (!res.ok) {
+      showToast(res.error === "offline" ? "אין חיבור לשרת כרגע" : "שמירת השם נכשלה");
+      return;
+    }
+    account.username = res.user.username;
+    writeJSON(STORAGE_KEYS.account, account);
+    usernameInput.blur();
+    showToast("השם עודכן");
+  }
+
+  function forgetList(listId) {
+    lists = lists.filter((l) => l.listId !== listId);
+    saveLists();
+    removeKey(STORAGE_KEYS.listCachePrefix + listId);
+  }
+
+  /* Leave account mode, keeping what's on screen as the local list. */
+  function dropAccount() {
+    if (sync) {
+      sync.stop();
+      sync.clearQueue();
+      sync = null;
+    }
+    lists.forEach((l) => removeKey(STORAGE_KEYS.listCachePrefix + l.listId));
+    [STORAGE_KEYS.account, STORAGE_KEYS.lists, STORAGE_KEYS.activeList].forEach(removeKey);
+    account = null;
+    lists = [];
+    activeListId = null;
+    listInfo = null;
+    syncStatus = "offline";
+    saveItems(); // now writes to the local-only key
+    render();
+    renderAccountUI();
+  }
+
+  function logout() {
+    showConfirm("להתנתק מהחשבון במכשיר הזה? כדי לחזור תצטרכו את קוד החיבור. הרשימה הנוכחית תישאר במכשיר.", () => {
+      accountOverlay.classList.add("hidden");
+      dropAccount();
+      showToast("התנתקת מהחשבון");
+    });
+  }
+
+  /* ---------- Real-time wiring ---------- */
+  function startSync() {
+    const client = new window.SyncClient({ url: BACKEND_URL, token: account.token });
+    sync = client;
+    let wakeToastShown = false;
+
+    // Handlers for a socket event about the active list. Skip echoes of items
+    // we still have unacknowledged local changes for (ours are newer).
+    const forActive = (fn) => (data) => {
+      if (!data || data.listId !== activeListId) return;
+      fn(data);
+      saveItems();
+      render();
+    };
+
+    client.on("status", (status) => {
+      syncStatus = status;
+      renderAccountUI();
+      if (status === "waking" && !wakeToastShown) {
+        wakeToastShown = true;
+        showToast("השרת מתעורר… הרשימה זמינה ותסתנכרן בעוד רגע", 3500);
+      }
+    });
+
+    client.on("session", ({ user, lists: serverLists }) => {
+      account.username = user.username;
+      writeJSON(STORAGE_KEYS.account, account);
+      applyLists(serverLists);
+    });
+
+    client.on("lists:updated", ({ lists: serverLists }) => applyLists(serverLists));
+
+    client.on("list:state", ({ list, items: serverItems }) => {
+      if (!list || list.listId !== activeListId) return;
+      listInfo = list;
+      items = serverItems.map(fromServerItem);
+      // Re-apply local changes the server hasn't confirmed yet.
+      client.pendingFor(activeListId).forEach((entry) => entry.op && applyOp(entry.op));
+      saveItems();
+      render();
+      renderAccountUI();
+    });
+
+    client.on("list:members", ({ listId, members, ownerId }) => {
+      if (listId !== activeListId) return;
+      listInfo = { listId, ownerId, members };
+      const meta = activeListMeta();
+      if (meta) meta.memberCount = members.length;
+      saveLists();
+      saveItems();
+      render();
+      renderAccountUI();
+    });
+
+    client.on("item:added", forActive(({ listId, item }) => {
+      if (client.hasPending(listId, item.itemId)) return;
+      const isNew = !items.some((i) => i.id === item.itemId);
+      applyOp({ type: "add", item: fromServerItem(item) });
+      if (isNew && item.addedBy !== account.userId) flashIds.add(item.itemId);
+    }));
+    client.on("item:toggled", forActive(({ listId, itemId, isCompleted }) => {
+      if (!client.hasPending(listId, itemId)) applyOp({ type: "toggle", id: itemId, bought: isCompleted });
+    }));
+    client.on("item:updated", forActive(({ listId, item }) => {
+      if (!client.hasPending(listId, item.itemId)) applyOp({ type: "add", item: fromServerItem(item) });
+    }));
+    client.on("item:deleted", forActive(({ itemId }) => applyOp({ type: "delete", id: itemId })));
+    client.on("item:cleared", forActive(({ itemIds }) => applyOp({ type: "remove", ids: itemIds })));
+
+    client.on("list:shared_notification", ({ listId, from }) => {
+      showToast(`${from.username} שיתף/ה איתך רשימה`, 7000, { label: "פתיחה", fn: () => switchList(listId) });
+    });
+
+    client.on("list:removed", ({ listId }) => {
+      const wasActive = listId === activeListId;
+      forgetList(listId);
+      if (wasActive) {
+        switchList(ownListId());
+        showToast("הוסרת מהרשימה המשותפת");
+      }
+      renderAccountUI();
+    });
+
+    // The active list isn't accessible anymore (e.g. removed while offline).
+    client.on("join_failed", ({ listId }) => {
+      if (listId !== activeListId) return;
+      forgetList(listId);
+      const fallback = ownListId();
+      if (fallback && fallback !== listId) switchList(fallback);
+    });
+
+    // Server refused a queued change: re-sync so the screen matches the truth.
+    client.on("op_rejected", () => client.join());
+
+    client.on("auth_error", () => {
+      // Token unknown to the server (e.g. its database was reset).
+      dropAccount();
+      showToast("החשבון לא נמצא בשרת. הרשימה נשמרה במכשיר — אפשר ליצור חשבון חדש.", 6000);
+      openWelcome("החשבון הקודם לא נמצא בשרת. צרו חשבון חדש כדי להמשיך לסנכרן — הפריטים שעל המסך יישמרו.");
+    });
+
+    client.setActiveList(activeListId);
+    return client;
+  }
+
+  function applyLists(serverLists) {
+    lists = serverLists || [];
+    saveLists();
+    if (!lists.some((l) => l.listId === activeListId)) {
+      switchList(ownListId());
+    } else {
+      renderAccountUI();
+    }
+  }
+
+  /* ---------- Welcome / sign-up ---------- */
+  function openWelcome(message) {
+    welcomeText.textContent = message || "צרו חשבון כדי לסנכרן את הרשימה בין מכשירים ולשתף אותה בזמן אמת עם בני הבית. הפריטים שכבר ברשימה יישמרו.";
+    setWelcomeStatus("");
+    registerPanel.classList.remove("hidden");
+    linkPanel.classList.add("hidden");
+    welcomeOverlay.classList.remove("hidden");
+  }
+  function closeWelcome() {
+    welcomeOverlay.classList.add("hidden");
+    writeJSON(STORAGE_KEYS.welcomeSeen, true);
+  }
+  function setWelcomeStatus(text, isError) {
+    welcomeStatus.textContent = text;
+    welcomeStatus.classList.toggle("hidden", !text);
+    welcomeStatus.classList.toggle("error", !!isError);
+  }
+  function setWelcomeBusy(busy) {
+    [registerBtn, linkDeviceBtn, welcomeNameInput, linkCodeInput].forEach((x) => { x.disabled = busy; });
+  }
+
+  /* Render's free tier can take ~50s to wake up, so allow a long timeout. */
+  async function backendFetch(path, options = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 90000);
+    const slow = setTimeout(() => setWelcomeStatus("השרת מתעורר, זה יכול לקחת עד דקה…"), 3000);
+    try {
+      const res = await fetch(BACKEND_URL + path, { ...options, signal: controller.signal });
+      const body = await res.json().catch(() => ({}));
+      return { ok: res.ok, status: res.status, body };
+    } finally {
+      clearTimeout(timer);
+      clearTimeout(slow);
+    }
+  }
+
+  async function registerAccount() {
+    const username = welcomeNameInput.value.trim();
+    if (!username) {
+      setWelcomeStatus("הזינו שם", true);
+      return;
+    }
+    setWelcomeBusy(true);
+    setWelcomeStatus("יוצר חשבון…");
+    try {
+      const res = await backendFetch("/api/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username }),
+      });
+      if (!res.ok) throw new Error(res.body.error || "register failed");
+      const { user, token, listId } = res.body;
+
+      const localItems = items.slice();
+      account = { userId: user.userId, username: user.username, token };
+      writeJSON(STORAGE_KEYS.account, account);
+      lists = [{ listId, ownerId: user.userId, ownerName: user.username, memberCount: 1 }];
+      saveLists();
+      setActiveList(listId);
+      listInfo = { listId, ownerId: user.userId, members: [{ userId: user.userId, username: user.username }] };
+      items = localItems.map((i) => ({ ...i, addedBy: user.userId }));
+      saveItems();
+
+      // Upload what was already on the device, then connect.
+      sync = startSync();
+      items.forEach((item) => {
+        const add = { type: "add", item };
+        sync.send(...toWire(add, listId), add);
+        if (item.bought) {
+          const toggle = { type: "toggle", id: item.id, bought: true };
+          sync.send(...toWire(toggle, listId), toggle);
+        }
+      });
+      sync.start();
+
+      closeWelcome();
+      render();
+      renderAccountUI();
+      showToast(`ברוכים הבאים, ${user.username}! 🎉`);
+    } catch (e) {
+      setWelcomeStatus(e.name === "AbortError" ? "השרת לא הגיב. נסו שוב בעוד רגע." : "יצירת החשבון נכשלה. בדקו את החיבור ונסו שוב.", true);
+    } finally {
+      setWelcomeBusy(false);
+    }
+  }
+
+  async function linkDevice() {
+    const token = linkCodeInput.value.trim();
+    if (!token) {
+      setWelcomeStatus("הזינו קוד חיבור", true);
+      return;
+    }
+    setWelcomeBusy(true);
+    setWelcomeStatus("מתחבר…");
+    try {
+      const res = await backendFetch("/api/me", { headers: { Authorization: "Bearer " + token } });
+      if (res.status === 401) {
+        setWelcomeStatus("קוד החיבור לא תקין", true);
+        return;
+      }
+      if (!res.ok) throw new Error("link failed");
+      const { user, lists: serverLists } = res.body;
+
+      // Keep this device's local-only list untouched under its own key.
+      account = { userId: user.userId, username: user.username, token };
+      writeJSON(STORAGE_KEYS.account, account);
+      lists = serverLists;
+      saveLists();
+      setActiveList(ownListId());
+      loadListCache(activeListId);
+      rowRefs.forEach((ref) => ref.row.remove());
+      rowRefs.clear();
+
+      sync = startSync();
+      sync.start();
+
+      closeWelcome();
+      render();
+      renderAccountUI();
+      showToast(`מחובר כ-${user.username} ✓`);
+    } catch (e) {
+      setWelcomeStatus(e.name === "AbortError" ? "השרת לא הגיב. נסו שוב בעוד רגע." : "החיבור נכשל. בדקו את החיבור לאינטרנט ונסו שוב.", true);
+    } finally {
+      setWelcomeBusy(false);
+    }
   }
 
   /* ---------- Event wiring ---------- */
@@ -544,13 +1277,56 @@
   templatesOverlay.addEventListener("click", (e) => { if (e.target === templatesOverlay) templatesOverlay.classList.add("hidden"); });
   saveTemplateBtn.addEventListener("click", saveCurrentAsTemplate);
 
+  // Account & sharing
+  enableSyncBtn.addEventListener("click", () => openWelcome());
+  copyIdBtn.addEventListener("click", () => copyText(account.userId, "מזהה המשתמש הועתק"));
+  copyFullIdBtn.addEventListener("click", () => copyText(account.userId, "מזהה המשתמש הועתק"));
+  membersBtn.addEventListener("click", openAccountModal);
+  closeAccountBtn.addEventListener("click", () => accountOverlay.classList.add("hidden"));
+  accountOverlay.addEventListener("click", (e) => { if (e.target === accountOverlay) accountOverlay.classList.add("hidden"); });
+  shareBtn.addEventListener("click", shareList);
+  shareUserIdInput.addEventListener("keydown", (e) => { if (e.key === "Enter") shareList(); });
+  leaveListBtn.addEventListener("click", leaveList);
+  saveUsernameBtn.addEventListener("click", saveUsername);
+  usernameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") saveUsername(); });
+  showLinkCodeBtn.addEventListener("click", () => {
+    linkCode.textContent = account.token;
+    linkCodeRow.classList.remove("hidden");
+    showLinkCodeBtn.classList.add("hidden");
+  });
+  copyLinkCodeBtn.addEventListener("click", () => copyText(account.token, "קוד החיבור הועתק — אל תשתפו אותו"));
+  logoutBtn.addEventListener("click", logout);
+
+  // Welcome
+  closeWelcomeBtn.addEventListener("click", closeWelcome);
+  skipWelcomeBtn.addEventListener("click", closeWelcome);
+  registerBtn.addEventListener("click", registerAccount);
+  welcomeNameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") registerAccount(); });
+  linkDeviceBtn.addEventListener("click", linkDevice);
+  linkCodeInput.addEventListener("keydown", (e) => { if (e.key === "Enter") linkDevice(); });
+  showLinkPanelBtn.addEventListener("click", () => {
+    setWelcomeStatus("");
+    registerPanel.classList.add("hidden");
+    linkPanel.classList.remove("hidden");
+  });
+  showRegisterPanelBtn.addEventListener("click", () => {
+    setWelcomeStatus("");
+    linkPanel.classList.add("hidden");
+    registerPanel.classList.remove("hidden");
+  });
+
   /* ---------- Init ---------- */
   loadState();
+  buildFilterRow();
   render();
+  renderAccountUI();
 
-  if ("serviceWorker" in navigator) {
-    window.addEventListener("load", () => {
-      navigator.serviceWorker.register("sw.js").catch(() => {});
-    });
+  if (account) {
+    sync = startSync();
+    sync.start();
+  } else if (BACKEND_URL && !readJSON(STORAGE_KEYS.welcomeSeen, false)) {
+    openWelcome();
   }
+
+  if (window.PWAUpdate) window.PWAUpdate.register("sw.js");
 })();

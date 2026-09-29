@@ -1,0 +1,49 @@
+# Deploys the frontend to GitHub Pages on every push to main.
+# It stamps a unique version into sw.js so installed PWAs detect the new
+# deploy and show the "new version available" banner.
+#
+# One-time setup: repo Settings -> Pages -> Build and deployment -> Source: "GitHub Actions".
+
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build site (frontend files only)
+        run: |
+          mkdir _site
+          rsync -a ./ _site/ \
+            --exclude '.git' --exclude '.github' --exclude '.claude' \
+            --exclude 'server' --exclude 'node_modules' --exclude '_site' \
+            --exclude 'README.md' --exclude 'render.yaml'
+          VERSION="${GITHUB_SHA::8}-${GITHUB_RUN_NUMBER}"
+          sed -i "s/__BUILD_VERSION__/${VERSION}/" _site/sw.js
+          grep -q "${VERSION}" _site/sw.js
+          echo "Stamped service worker version ${VERSION}"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
