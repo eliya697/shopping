@@ -26,8 +26,10 @@ const store = require("./db");
 
 // GEMINI_API_BASE exists only so tests can point this at a fake server.
 const GEMINI_API = process.env.GEMINI_API_BASE || "https://generativelanguage.googleapis.com/v1beta";
-// Tried in order after GEMINI_MODEL. "gemini-flash-latest" is Google's alias for the current Flash model.
+// Tried after GEMINI_MODEL, then every Flash model the key's model list reports (newest first).
+// "gemini-flash-latest" is Google's alias for the current Flash model. (gemini-1.5-* was retired in 2025.)
 const MODEL_CANDIDATES = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash"];
+const MAX_MODELS_PER_QUESTION = 5;
 const REQUEST_TIMEOUT_MS = 25000;
 const MAX_ATTEMPTS_PER_MODEL = 3;
 const TOTAL_BUDGET_MS = 45000; // all models and retries together; the app waits 60s
@@ -134,12 +136,16 @@ function classify(status, message) {
   const m = String(message || "");
   if (status === 400 && /api key|API_KEY/i.test(m)) return "invalid_key";
   if (status === 401 || status === 403) return /api key|API_KEY/i.test(m) ? "invalid_key" : "forbidden";
-  if (status === 404 || /not found|is not supported|no longer available|deprecated/i.test(m)) return "model_not_found";
   if (status === 429) return "quota";
-  if (status === 400 && /schema|response_mime_type|responseMimeType|Invalid JSON payload|Unknown name/i.test(m)) return "schema";
+  // Request-shape problems first: "JSON mode is not supported…" is not a missing model.
+  if (status === 400 && /schema|response_mime_type|responseMimeType|mime type|JSON mode|Invalid JSON payload|Unknown name/i.test(m)) return "schema";
+  if (status === 404 || /models\/\S+ is not found|not found for API version|not supported for generateContent|no longer available/i.test(m)) return "model_not_found";
   if (status >= 500) return "overloaded";
   return "bad_request";
 }
+
+/* Gemini's own error text, safe to show: trimmed, and any API key in it redacted. */
+const redact = (text) => String(text || "").replace(/AIza[0-9A-Za-z_-]{10,}/g, "AIza…").slice(0, 300);
 
 const TRANSIENT = new Set(["overloaded", "timeout", "bad_response", "network"]);
 
@@ -150,21 +156,36 @@ const health = {
   model: null, // the model currently used first
   reason: null, // last failure reason, for /api/ai/status
   available: null, // Set of model ids the key can call generateContent on, if known
+  dead: new Set(), // models that answered "not found" — skipped from then on
+  lastError: null, // { reason, detail, model, at } of the last failed question
   checkedAt: null,
 };
 
+/*
+ * "gemini-2.5-flash" > "gemini-2.0-flash"; stable before preview; full before lite.
+ * Only text chat models: no image/tts/live/audio/embedding variants.
+ */
+function rankFlashModels(ids) {
+  const version = (id) => parseFloat((/gemini-(\d+(?:\.\d+)?)/.exec(id) || [])[1] || "0");
+  return ids
+    .filter((id) => /^gemini-.*flash/.test(id) && !/image|tts|live|audio|embedding|vision|thinking-exp|learnlm/.test(id))
+    .sort((a, b) =>
+      version(b) - version(a)
+      || /preview|exp/.test(a) - /preview|exp/.test(b)
+      || /lite/.test(a) - /lite/.test(b)
+      || a.length - b.length);
+}
+
 function modelOrder() {
-  const order = [process.env.GEMINI_MODEL, health.model, ...MODEL_CANDIDATES].filter(Boolean);
-  let unique = [...new Set(order)];
+  const configured = process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL.trim()] : [];
+  const discovered = health.available ? rankFlashModels([...health.available]) : [];
+  let order = [...new Set([...configured, health.model, ...MODEL_CANDIDATES, ...discovered].filter(Boolean))];
   if (health.available && health.available.size) {
-    // Skip models we know this key can't use, but keep aliases (they aren't always listed).
-    unique = unique.filter((m) => health.available.has(m) || /latest$/.test(m));
-    if (!unique.length) {
-      const flash = [...health.available].filter((m) => /flash/.test(m) && !/lite|image|tts|live|audio|embedding|preview/.test(m));
-      unique = flash.sort().reverse().slice(0, 2);
-    }
+    // Skip guesses the key's model list doesn't have (aliases like *-latest aren't always listed).
+    order = order.filter((m) => health.available.has(m) || /latest$/.test(m) || configured.includes(m));
   }
-  return unique;
+  order = order.filter((m) => !health.dead.has(m)); // answered 404 earlier in this process
+  return order.slice(0, MAX_MODELS_PER_QUESTION);
 }
 
 /*
@@ -175,28 +196,39 @@ function modelOrder() {
 async function checkGemini(apiKey = geminiKey()) {
   if (!apiKey) return health;
   try {
-    const res = await fetch(`${GEMINI_API}/models?pageSize=200`, {
-      headers: { "x-goog-api-key": apiKey },
-      signal: AbortSignal.timeout(15000),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const message = (body.error && body.error.message) || `HTTP ${res.status}`;
-      health.ok = false;
-      health.reason = classify(res.status, message);
-      console.error(`[ai] Gemini key check failed (${health.reason}): ${message}`);
-    } else {
-      health.available = new Set(
-        (body.models || [])
-          .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"))
-          .map((m) => String(m.name || "").replace(/^models\//, ""))
-          .filter(Boolean)
-      );
-      health.ok = true;
-      health.reason = null;
-      health.model = modelOrder()[0] || null;
-      console.log(`[ai] Gemini key OK — ${health.available.size} models available, using ${health.model || "(none found!)"}`);
+    const models = [];
+    let pageToken = "";
+    for (let page = 0; page < 5; page++) {
+      const res = await fetch(`${GEMINI_API}/models?pageSize=200${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""}`, {
+        headers: { "x-goog-api-key": apiKey },
+        signal: AbortSignal.timeout(15000),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const message = redact((body.error && body.error.message) || `HTTP ${res.status}`);
+        health.ok = false;
+        health.reason = classify(res.status, message);
+        health.lastError = { reason: health.reason, detail: message, model: null, at: Date.now() };
+        console.error(`[ai] Gemini key check failed (${health.reason}): ${message}`);
+        return health;
+      }
+      models.push(...(body.models || []));
+      pageToken = body.nextPageToken;
+      if (!pageToken) break;
     }
+    health.available = new Set(
+      models
+        .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"))
+        .map((m) => String(m.name || "").replace(/^models\//, ""))
+        .filter(Boolean)
+    );
+    health.ok = true;
+    health.reason = null;
+    health.model = null;
+    health.dead.clear();
+    const order = modelOrder();
+    health.model = order[0] || null;
+    console.log(`[ai] Gemini key OK — ${health.available.size} models available; will try: ${order.join(", ") || "(no Flash model found!)"}`);
   } catch (err) {
     health.reason = "network";
     console.error(`[ai] Gemini key check could not reach Google: ${err.message}`);
@@ -278,7 +310,10 @@ async function callModel({ apiKey, model, contents, useSchema, timeoutMs = REQUE
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
     const message = (body.error && body.error.message) || "request failed";
-    throw new GeminiError(classify(res.status, message), `${model} ${res.status}: ${message}`, res.status);
+    const err = new GeminiError(classify(res.status, message), `${model} ${res.status}: ${redact(message)}`, res.status);
+    err.detail = redact(message);
+    err.model = model;
+    throw err;
   }
   const candidate = body.candidates && body.candidates[0];
   const text = candidate && candidate.content && (candidate.content.parts || []).map((p) => p.text || "").join("");
@@ -313,7 +348,11 @@ async function askGemini({ apiKey, history, message, listItems }) {
           useSchema = false; // the prompt also describes the JSON shape
           continue;
         }
-        if (err.reason === "model_not_found") break; // next model
+        if (err.reason === "model_not_found") {
+          health.dead.add(model);
+          if (health.model === model) health.model = null;
+          break; // next model
+        }
         if (TRANSIENT.has(err.reason) && attempt < MAX_ATTEMPTS_PER_MODEL) {
           await sleep(700 * attempt);
           continue;
@@ -331,20 +370,34 @@ function aiRouter() {
   const router = express.Router();
   router.use(express.json({ limit: "64kb" }));
 
-  // Safe to expose: no secrets, just whether the assistant works and why not.
-  router.get("/status", (_req, res) => {
+  /*
+   * Safe to expose: no secrets, just whether the assistant works and why not.
+   * ?refresh=1 re-runs the key check (at most once a minute).
+   */
+  router.get("/status", async (req, res) => {
+    if (req.query.refresh && geminiKey() && Date.now() - (health.checkedAt || 0) > 60000) await checkGemini();
     res.json({
       enabled: !!geminiKey(),
       ok: health.ok,
       model: health.model,
+      tryOrder: geminiKey() ? modelOrder() : [],
+      availableFlash: health.available ? rankFlashModels([...health.available]) : null,
+      notFound: [...health.dead],
       reason: health.reason,
+      lastError: health.lastError,
       checkedAt: health.checkedAt,
     });
   });
 
   router.post("/chat", async (req, res) => {
     const apiKey = geminiKey();
-    if (!apiKey) return res.status(503).json({ error: "AI assistant is not configured", code: "AI_DISABLED" });
+    if (!apiKey) {
+      return res.status(503).json({
+        error: "AI assistant is not configured",
+        code: "AI_DISABLED",
+        message: "מפתח GEMINI_API_KEY חסר בשרת (Render)",
+      });
+    }
     if (!store.isReady()) {
       return res.set("Retry-After", "3").status(503).json({ error: "server is starting, try again", code: "SERVER_UNAVAILABLE" });
     }
@@ -385,14 +438,18 @@ function aiRouter() {
     } catch (err) {
       refund(user.userId);
       const reason = err.reason || "unknown";
+      const detail = err.detail || redact(err.message);
       health.reason = reason;
+      health.lastError = { reason, detail, model: err.model || null, at: Date.now() };
       if (reason === "invalid_key" || reason === "forbidden") health.ok = false;
       console.error(`[ai] giving up (${reason}): ${err.message}`);
       if (reason === "blocked") {
         return res.json({ reply: "אני לא יכול לעזור עם זה. אפשר לשאול אותי על ארוחות, מתכונים וקניות 🙂", sections: [] });
       }
-      if (reason === "quota") return res.status(429).json({ error: "Gemini quota exceeded", code: "AI_QUOTA", reason });
-      res.status(502).json({ error: "assistant unavailable", code: "AI_FAILED", reason });
+      // Structured, so the app can say exactly what's wrong (bad key, quota, missing model…).
+      const body = { error: "assistant unavailable", code: reason === "quota" ? "AI_QUOTA" : "AI_FAILED", reason, detail, model: err.model || null };
+      if (reason === "model_not_found" && health.available) body.tried = [...health.dead];
+      res.status(reason === "quota" ? 429 : 502).json(body);
     }
   });
 
@@ -405,4 +462,6 @@ aiRouter.classify = classify;
 aiRouter.checkGemini = checkGemini;
 aiRouter.askGemini = askGemini;
 aiRouter.health = health;
+aiRouter.modelOrder = modelOrder;
+aiRouter.rankFlashModels = rankFlashModels;
 module.exports = aiRouter;

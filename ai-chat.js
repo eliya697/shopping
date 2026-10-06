@@ -3,15 +3,15 @@
  * endpoint. Suggested products come back as structured sections and are shown
  * as cards with one-tap "add to list" buttons.
  *
- * The conversation is kept on the device (localStorage). The app supplies the
+ * The conversation lives in memory only: every app start (and "שיחה חדשה") begins
+ * fresh, showing just the suggestion chips. The app supplies the
  * account token, the open items on the active list (context for the model) and
  * an addItem() callback, so this module never touches list state itself.
  */
 (function (root) {
   "use strict";
 
-  const STORAGE_KEY = "shoppingList.aiChat.v1";
-  const MAX_STORED = 40;
+  const LEGACY_STORAGE_KEY = "shoppingList.aiChat.v1"; // older versions saved the chat; removed on start
   const HISTORY_TURNS = 12;
   const REQUEST_TIMEOUT_MS = 60000; // one attempt; Gemini itself is retried on the server
   const WAKE_DEADLINE_MS = 100000; // a sleeping Render instance can take ~50s (sometimes more) to boot
@@ -31,13 +31,14 @@
 
   // Keys: the server's `code`, or for AI_FAILED its `reason`.
   const ERRORS = {
-    AI_DISABLED: "העוזר החכם עדיין לא הוגדר בשרת (חסר מפתח Gemini).",
+    AI_DISABLED: "מפתח GEMINI_API_KEY חסר בשרת (Render), ולכן העוזר החכם כבוי.",
     INVALID_TOKEN: "החשבון לא אומת מול השרת. נסו להתחבר מחדש.",
     RATE_LIMITED: "הגעתם למגבלת השאלות לשעה. נסו שוב מאוחר יותר.",
     AI_QUOTA: "העוזר הגיע למכסת השימוש של Gemini. נסו שוב בעוד כמה דקות.",
     invalid_key: "מפתח ה-Gemini שמוגדר בשרת לא תקין או חסום, ולכן העוזר לא זמין. (מנהל האפליקציה: בדקו את GEMINI_API_KEY ב-Render.)",
     forbidden: "מפתח ה-Gemini בשרת לא מורשה להשתמש במודל. (מנהל האפליקציה: בדקו את הגבלות המפתח ב-Google AI Studio.)",
-    model_not_found: "מודל ה-AI לא זמין כרגע. נסו שוב מאוחר יותר.",
+    model_not_found: "אף מודל Gemini לא זמין כרגע למפתח שמוגדר בשרת.",
+    bad_request: "Gemini דחה את הבקשה.",
     overloaded: "Gemini עמוס כרגע. נסו שוב בעוד רגע.",
     timeout: "התשובה לקחה יותר מדי זמן. נסו שוב.",
     bad_response: "התקבלה תשובה משובשת מהעוזר. נסו לנסח את השאלה מחדש.",
@@ -58,20 +59,13 @@
 
   let opts = null;
   let $ = {};
-  let messages = []; // { role: "user" | "model", text, sections?, error?: true, retryText? }
+  let messages = []; // { role: "user" | "model", text, sections?, error?: true, detail?, retryText? }
   let busy = false;
   let voice = null;
+  let conversation = 0; // bumped by "new chat"; answers to an older conversation are dropped
 
-  function load() {
-    try {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-      messages = Array.isArray(saved) ? saved : [];
-    } catch (e) {
-      messages = [];
-    }
-  }
-  function save() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(messages.filter((m) => !m.error).slice(-MAX_STORED))); } catch (e) {}
+  function forgetStoredChat() {
+    try { localStorage.removeItem(LEGACY_STORAGE_KEY); } catch (e) {}
   }
 
   /* What the model said before, compacted: its text plus the product names it suggested. */
@@ -89,13 +83,17 @@
   }
 
   /* ---------- Rendering ---------- */
+  function promptButtons(className) {
+    return PROMPTS.map((prompt) => {
+      const chip = make("button", className, prompt);
+      chip.addEventListener("click", () => send(prompt));
+      return chip;
+    });
+  }
+
   function renderChips() {
     $.chips.innerHTML = "";
-    PROMPTS.forEach((prompt) => {
-      const chip = make("button", "chip ai-chip", prompt);
-      chip.addEventListener("click", () => send(prompt));
-      $.chips.appendChild(chip);
-    });
+    promptButtons("chip ai-chip").forEach((chip) => $.chips.appendChild(chip));
   }
 
   function addButtonState(btn, name) {
@@ -142,7 +140,16 @@
 
   function renderMessage(m, index) {
     const wrap = make("div", `ai-msg ${m.error ? "error" : m.role}`);
-    if (m.text) wrap.appendChild(make("div", "ai-bubble", m.text));
+    if (m.text) {
+      const bubble = make("div", "ai-bubble", m.text);
+      // Gemini's own words (key/quota/model problems), for whoever has to fix it.
+      if (m.detail) {
+        const detail = make("div", "ai-error-detail", m.detail);
+        detail.dir = "ltr";
+        bubble.appendChild(detail);
+      }
+      wrap.appendChild(bubble);
+    }
     (m.sections || []).forEach((s) => wrap.appendChild(renderSection(s)));
     if (m.error && m.retryText && index === messages.length - 1) {
       const retry = make("button", "small-btn", "🔄 נסו שוב");
@@ -157,10 +164,14 @@
     return wrap;
   }
 
-  function renderWelcome() {
-    const wrap = make("div", "ai-msg model");
-    wrap.appendChild(make("div", "ai-bubble",
-      "שלום! 👋 אני העוזר החכם של רשימת הקניות.\nאפשר לשאול אותי על רעיונות לארוחות, מתכונים, מה בעונה או איך לחסוך — ואת המצרכים שאציע תוכלו להוסיף לרשימה בלחיצה."));
+  /* Fresh chat: nothing but the suggestions. */
+  function renderEmpty() {
+    const wrap = make("div", "ai-empty");
+    wrap.appendChild(make("div", "ai-empty-icon", "✦"));
+    wrap.appendChild(make("div", "ai-empty-title", "במה אפשר לעזור?"));
+    const grid = make("div", "ai-empty-prompts");
+    promptButtons("ai-prompt-card").forEach((card) => grid.appendChild(card));
+    wrap.appendChild(grid);
     return wrap;
   }
 
@@ -169,12 +180,13 @@
     $.gate.classList.toggle("hidden", signedIn);
     $.messages.classList.toggle("hidden", !signedIn);
     $.bar.classList.toggle("hidden", !signedIn);
-    $.chips.classList.toggle("hidden", !signedIn);
-    $.newChat.classList.toggle("hidden", !signedIn || !messages.length);
+    $.chips.classList.toggle("hidden", !signedIn || !messages.length);
+    $.newChat.classList.toggle("hidden", !signedIn);
+    $.newChat.disabled = !messages.length && !busy;
     if (!signedIn) return;
 
     $.messages.innerHTML = "";
-    if (!messages.length) $.messages.appendChild(renderWelcome());
+    if (!messages.length && !busy) $.messages.appendChild(renderEmpty());
     messages.forEach((m, i) => $.messages.appendChild(renderMessage(m, i)));
     if (busy) {
       const typing = make("div", "ai-msg model");
@@ -285,8 +297,12 @@
           setStatus(STATUS.thinking);
           continue;
         }
-        if (body.code === "AI_FAILED") throw { code: body.reason || "default" };
-        throw { code: body.code || (res.status === 401 ? "INVALID_TOKEN" : res.status === 429 ? "RATE_LIMITED" : "default") };
+        if (body.code === "AI_FAILED") throw { code: body.reason || "default", detail: body.detail };
+        throw {
+          code: body.code || (res.status === 401 ? "INVALID_TOKEN" : res.status === 429 ? "RATE_LIMITED" : "default"),
+          message: body.message,
+          detail: body.detail,
+        };
       }
     } finally {
       clearTimeout(hint);
@@ -301,31 +317,44 @@
       return;
     }
     const history = historyForServer();
+    const myConversation = conversation;
     messages.push({ role: "user", text });
     $.input.value = "";
     busy = true;
     render();
     scrollToEnd();
 
+    let reply;
     try {
       const answer = await request({ message: text, history, listItems: opts.getListNames() });
-      messages.push({ role: "model", text: answer.reply || "", sections: answer.sections || [] });
+      reply = { role: "model", text: answer.reply || "", sections: answer.sections || [] };
     } catch (e) {
       const code = (e && e.code) || "default";
-      messages.push({ role: "model", error: true, text: ERRORS[code] || ERRORS.default, retryText: NOT_RETRYABLE.has(code) ? null : text });
-    } finally {
-      busy = false;
-      save();
-      render();
-      scrollToEnd();
+      const showDetail = ["invalid_key", "forbidden", "AI_QUOTA", "model_not_found", "bad_request"].includes(code);
+      reply = {
+        role: "model",
+        error: true,
+        text: (code === "AI_DISABLED" && e.message ? e.message : ERRORS[code]) || ERRORS.default,
+        detail: showDetail && e.detail ? e.detail : null,
+        retryText: NOT_RETRYABLE.has(code) ? null : text,
+      };
     }
+    if (myConversation !== conversation) return; // the user started a new chat meanwhile
+    messages.push(reply);
+    busy = false;
+    render();
+    scrollToEnd();
   }
 
   function newChat() {
-    if (busy) return;
+    conversation++;
     messages = [];
-    save();
+    busy = false;
+    forgetStoredChat();
+    if (voice && voice.listening) voice.cancel();
+    $.input.value = "";
     render();
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   function setupVoice() {
@@ -366,7 +395,7 @@
       voicePanel: el("aiVoicePanel"), voiceText: el("aiVoiceText"), voiceStop: el("aiVoiceStopBtn"),
       newChat: el("aiNewChatBtn"),
     };
-    load();
+    forgetStoredChat(); // always start fresh
     renderChips();
     setupVoice();
     $.send.addEventListener("click", () => send($.input.value));

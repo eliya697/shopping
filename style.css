@@ -1439,3 +1439,71 @@ strong.plain { color: var(--text); font-weight: 700; }
 }
 .modal-header { padding-top: 10px; }
 .modal-overlay { background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(2px); }
+
+/* ---------- AI: new chat button, empty state, error details ---------- */
+.new-chat-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  font-size: 0.84rem;
+  font-weight: 700;
+  transition: opacity 0.15s, transform 0.1s;
+}
+.new-chat-btn:not(:disabled):active { transform: scale(0.96); }
+.new-chat-btn:disabled { opacity: 0.45; cursor: default; }
+
+.ai-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 28px 4px 8px;
+  text-align: center;
+}
+.ai-empty-icon {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+  font-size: 1.8rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ai-empty-title { font-size: 1.15rem; font-weight: 800; margin-bottom: 6px; }
+.ai-empty-prompts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+.ai-prompt-card {
+  min-height: 72px;
+  padding: 12px;
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  border: 1px solid var(--card-border);
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: start;
+  transition: border-color 0.15s, transform 0.1s;
+}
+.ai-prompt-card:active { transform: scale(0.97); border-color: var(--accent); }
+
+.ai-error-detail {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid currentColor;
+  font-size: 0.75rem;
+  opacity: 0.75;
+  text-align: left;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  word-break: break-word;
+}

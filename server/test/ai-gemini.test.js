@@ -4,6 +4,7 @@ const assert = require("assert");
 const http = require("http");
 
 const calls = [];
+let listed = ["gemini-2.5-flash", "gemini-3-flash"]; // what the fake key's model list returns
 let script = {}; // model -> array of responses to hand out in order: { status, body } | "hang"
 const fake = http.createServer((req, res) => {
   let raw = "";
@@ -11,10 +12,10 @@ const fake = http.createServer((req, res) => {
   req.on("end", () => {
     if (req.url.startsWith("/models?")) {
       res.writeHead(200, { "content-type": "application/json" });
-      return res.end(JSON.stringify({ models: [
-        { name: "models/gemini-2.5-flash", supportedGenerationMethods: ["generateContent"] },
-        { name: "models/gemini-3-flash", supportedGenerationMethods: ["generateContent"] },
-      ] }));
+      return res.end(JSON.stringify({ models: listed.map((id) => ({
+        name: "models/" + id,
+        supportedGenerationMethods: id.includes("embedding") ? ["embedContent"] : ["generateContent"],
+      })) }));
     }
     const model = decodeURIComponent(/\/models\/([^:]+):generateContent/.exec(req.url)[1]);
     const body = JSON.parse(raw || "{}");
@@ -73,6 +74,24 @@ const good = JSON.stringify({ reply: "שקשוקה!", sections: [{ title: "שק�
   // Quota -> its own reason.
   script = { "gemini-2.5-flash": [{ status: 429, body: { error: { message: "Resource has been exhausted" } } }] };
   await assert.rejects(ask(), (e) => e.reason === "quota");
+
+  // Production case: the key's model list has none of the built-in names, and the
+  // alias 404s. The server must move on to the Flash models the key does list.
+  listed = ["gemini-3-flash-lite", "gemini-3-flash", "gemini-3-flash-image", "gemini-3-pro", "text-embedding-005"];
+  await ai.checkGemini();
+  assert.deepEqual(ai.rankFlashModels(listed), ["gemini-3-flash", "gemini-3-flash-lite"]);
+  calls.length = 0;
+  script = { "gemini-3-flash": [answer(good)] };
+  res = await ask();
+  assert.equal(res.reply, "שקשוקה!");
+  assert.deepEqual(calls.map((c) => c.model), ["gemini-flash-latest", "gemini-3-flash"]);
+  // The dead alias isn't retried on the next question.
+  calls.length = 0;
+  script = { "gemini-3-flash": [answer(good)] };
+  await ask();
+  assert.deepEqual(calls.map((c) => c.model), ["gemini-3-flash"]);
+  // "not supported" about the request shape is a schema problem, not a missing model.
+  assert.equal(ai.classify(400, "JSON mode is not supported for this model"), "schema");
 
   // Lenient parsing helpers
   assert.deepEqual(ai.parseLooseJson('Sure! {"reply":"x","sections":[]} hope it helps'), { reply: "x", sections: [] });
