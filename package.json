@@ -1,0 +1,21 @@
+{
+  "name": "shopping-list-app",
+  "version": "3.0.0",
+  "private": true,
+  "description": "Shopping list web app (GitHub Pages PWA) and its Capacitor Android shell",
+  "scripts": {
+    "build:web": "node scripts/build-web.js",
+    "cap:sync": "npm run build:web && npx cap sync android",
+    "android": "npm run cap:sync && npx cap open android",
+    "test": "node tests/parser.test.js"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/app": "^8.1.2",
+    "@capacitor/core": "^8.5.2",
+    "@capacitor/splash-screen": "^8.0.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.2"
+  }
+}

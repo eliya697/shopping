@@ -1,0 +1,25 @@
+{
+  "appId": "io.github.eliya697.shopping",
+  "appName": "רשימת קניות",
+  "webDir": "www",
+  "backgroundColor": "#121212",
+  "android": {
+    "backgroundColor": "#121212"
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1200,
+      "launchAutoHide": true,
+      "launchFadeOutDuration": 250,
+      "backgroundColor": "#121212",
+      "showSpinner": false,
+      "androidScaleType": "CENTER_CROP"
+    },
+    "SystemBars": {
+      "insetsHandling": "css",
+      "initialViewportFitValueHint": "cover",
+      "style": "DARK",
+      "hidden": false
+    }
+  }
+}

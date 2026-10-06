@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0f766e">
+<meta name="theme-color" content="#121212">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -15,16 +15,19 @@
 <link rel="stylesheet" href="style.css">
 <script>
   try {
+    // Dark is the default; "light" is opt-in from the Profile tab.
     var savedTheme = localStorage.getItem("shoppingList.theme.v1");
-    if (savedTheme === "dark" || savedTheme === "light") {
-      document.documentElement.setAttribute("data-theme", savedTheme);
-    }
-  } catch (e) {}
+    document.documentElement.setAttribute("data-theme", savedTheme === "light" ? "light" : "dark");
+  } catch (e) {
+    document.documentElement.setAttribute("data-theme", "dark");
+  }
 </script>
 </head>
 <body>
 <div id="app">
 
+  <!-- ================= Lists tab ================= -->
+  <section class="tab-panel" id="listsTab" data-tab="lists">
   <header class="app-header">
     <div class="header-top">
       <h1 id="appTitle">🛒 רשימת קניות</h1>
@@ -33,7 +36,6 @@
         <span class="list-switcher-chev">▾</span>
       </button>
       <div class="header-actions">
-        <button class="icon-btn" id="themeToggleBtn" aria-label="החלף מצב תצוגה" title="החלף מצב תצוגה">🌙</button>
         <button class="icon-btn" id="templatesBtn" aria-label="תבניות מועדפות" title="תבניות מועדפות">⭐</button>
         <button class="icon-btn" id="resetAllBtn" aria-label="אפס רשימה שלמה" title="אפס רשימה שלמה">🗑️</button>
       </div>
@@ -50,16 +52,11 @@
     <div class="account-row hidden" id="accountRow">
       <button class="enable-sync-btn hidden" id="enableSyncBtn">☁️ הפעלת סנכרון ושיתוף</button>
 
-      <div class="id-badge hidden" id="idBadge">
-        <span class="id-label">ID</span>
-        <code id="userIdShort" dir="ltr"></code>
-        <button class="id-copy-btn" id="copyIdBtn" aria-label="העתק מזהה משתמש" title="העתק מזהה">📋 העתק</button>
-      </div>
-
       <button class="members-pill hidden" id="membersBtn" aria-label="שיתוף ומשתתפים">
         👥 <span id="membersText">שיתוף</span>
       </button>
     </div>
+    <div class="sync-bar hidden" id="syncBar" role="progressbar" aria-label="מסתנכרן"></div>
   </header>
 
   <div class="search-row">
@@ -75,11 +72,6 @@
   </div>
 
   <div class="filter-row" id="filterRow"></div>
-
-  <div class="bought-bar hidden" id="boughtBar">
-    <span id="boughtBarText"></span>
-    <button class="bought-bar-btn" id="clearBoughtBtn">🧹 ניקוי נקנו</button>
-  </div>
 
   <main class="list-container" id="listContainer"></main>
 
@@ -105,6 +97,144 @@
       <button class="add-btn" id="addBtn" aria-label="הוסף פריט">+</button>
     </div>
   </footer>
+  </section>
+
+  <!-- ================= AI assistant tab ================= -->
+  <section class="tab-panel hidden" id="aiTab" data-tab="ai">
+    <header class="app-header">
+      <div class="header-top">
+        <h1>✦ עוזר חכם</h1>
+        <div class="header-actions">
+          <button class="icon-btn" id="aiNewChatBtn" aria-label="שיחה חדשה" title="שיחה חדשה">🗒️</button>
+        </div>
+      </div>
+      <p class="subtitle">ארוחות, מתכונים וקניות חכמות · מופעל ע״י Gemini</p>
+    </header>
+
+    <div class="ai-chips" id="aiChips" aria-label="הצעות לשאלות"></div>
+
+    <main class="ai-messages" id="aiMessages" aria-live="polite"></main>
+
+    <div class="ai-gate hidden" id="aiGate">
+      <div class="empty-emoji">✦</div>
+      <p>העוזר החכם זמין למשתמשים מחוברים</p>
+      <span>צרו חשבון (חינם, רק שם) כדי לשאול על ארוחות ולהוסיף מצרכים לרשימה בלחיצה.</span>
+      <button class="small-btn primary" id="aiGateBtn">☁️ יצירת חשבון</button>
+    </div>
+
+    <footer class="add-bar" id="aiBar">
+      <div class="voice-panel hidden" id="aiVoicePanel" role="status">
+        <span class="voice-pulse" aria-hidden="true"></span>
+        <span class="voice-text" id="aiVoiceText">מקשיב…</span>
+        <button class="voice-stop" id="aiVoiceStopBtn">סיום</button>
+      </div>
+      <div class="add-input-row">
+        <div class="add-field">
+          <input type="text" id="aiInput" placeholder="שאלו על ארוחות, מתכונים או קניות…" autocomplete="off" maxlength="1000" enterkeyhint="send">
+          <button class="field-btn hidden" id="aiMicBtn" aria-label="שאלה בקול" title="שאלה בקול">🎤</button>
+        </div>
+        <button class="add-btn send-btn" id="aiSendBtn" aria-label="שליחה">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M3.4 20.4 21 12 3.4 3.6 3.3 10l12.6 2-12.6 2z"/></svg>
+        </button>
+      </div>
+    </footer>
+  </section>
+
+  <!-- ================= Profile / settings tab ================= -->
+  <section class="tab-panel hidden" id="profileTab" data-tab="profile">
+    <header class="app-header">
+      <div class="header-top"><h1>👤 פרופיל והגדרות</h1></div>
+    </header>
+
+    <main class="tab-body">
+      <section class="acc-section hidden" id="profileGuestSection">
+        <div class="acc-card">
+          <div class="profile-hero">☁️</div>
+          <div class="acc-label">צרו חשבון כדי לסנכרן את הרשימות בין מכשירים, לשתף אותן בזמן אמת ולהשתמש בעוזר החכם. הפריטים שכבר ברשימה יישמרו.</div>
+          <button class="small-btn primary" id="profileSyncBtn">הפעלת סנכרון ושיתוף</button>
+        </div>
+      </section>
+
+      <section class="acc-section hidden" id="profileAccountSection">
+        <h3>החשבון שלי</h3>
+        <div class="acc-card">
+          <div class="acc-field-row">
+            <input type="text" id="usernameInput" maxlength="30" placeholder="השם שלך" autocomplete="off">
+            <button class="small-btn" id="saveUsernameBtn">שמור</button>
+          </div>
+          <div class="acc-label">מזהה המשתמש שלך (לשיתוף רשימות)</div>
+          <div class="acc-id-row">
+            <code class="acc-id" id="fullUserId" dir="ltr"></code>
+            <button class="small-btn" id="copyFullIdBtn">📋 העתק</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="acc-section hidden" id="profileSyncSection">
+        <h3>סנכרון</h3>
+        <div class="acc-card">
+          <div class="acc-status" id="syncStatusText"></div>
+          <div class="acc-label" id="syncDetailText"></div>
+          <div class="acc-actions">
+            <button class="small-btn" id="syncNowBtn">🔄 סנכרון עכשיו</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="acc-section">
+        <h3>מראה</h3>
+        <div class="acc-card">
+          <div class="segmented" role="radiogroup" aria-label="ערכת נושא">
+            <button class="segment" role="radio" data-theme-choice="dark">🌙 כהה</button>
+            <button class="segment" role="radio" data-theme-choice="light">☀️ בהיר</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="acc-section">
+        <h3>רשימות</h3>
+        <div class="acc-list">
+          <button class="acc-row settings-row hidden" id="profileListsBtn"><span class="settings-icon">📋</span><span class="acc-row-main acc-row-title">הרשימות שלי</span><span class="settings-chev">‹</span></button>
+          <button class="acc-row settings-row" id="profileTemplatesBtn"><span class="settings-icon">⭐</span><span class="acc-row-main acc-row-title">תבניות מועדפות</span><span class="settings-chev">‹</span></button>
+          <button class="acc-row settings-row" id="profileOrderBtn"><span class="settings-icon">🧭</span><span class="acc-row-main acc-row-title">סדר המחלקות בסופר</span><span class="settings-chev">‹</span></button>
+        </div>
+      </section>
+
+      <section class="acc-section hidden" id="deviceSection">
+        <h3>מכשיר נוסף</h3>
+        <div class="acc-card">
+          <div class="acc-label">כדי לפתוח את אותו חשבון בטלפון או במחשב נוסף, העתיקו את קוד החיבור והזינו אותו שם.
+            <strong>אל תשתפו את הקוד</strong> — הוא כמו סיסמה. לשיתוף רשימה משתמשים בקישור ההזמנה.</div>
+          <div class="acc-id-row hidden" id="linkCodeRow">
+            <code class="acc-id" id="linkCode" dir="ltr"></code>
+            <button class="small-btn" id="copyLinkCodeBtn">📋 העתק</button>
+          </div>
+          <div class="acc-actions">
+            <button class="small-btn" id="showLinkCodeBtn">הצג קוד חיבור</button>
+            <button class="small-btn danger" id="logoutBtn">התנתקות מהמכשיר</button>
+          </div>
+        </div>
+      </section>
+
+      <p class="app-version" id="appVersion"></p>
+    </main>
+  </section>
+
+  <!-- ================= Bottom navigation ================= -->
+  <nav class="bottom-nav" id="bottomNav" aria-label="ניווט ראשי">
+    <button class="nav-btn active" data-tab="lists" aria-current="page">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M9 5h11v2H9zm0 6h11v2H9zm0 6h11v2H9zM4 4.5h3v3H4zm0 6h3v3H4zm0 6h3v3H4z"/></svg>
+      <span>רשימות</span>
+    </button>
+    <button class="nav-btn" data-tab="ai">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M11 2.5c.5 4.6 2.9 7 7.5 7.5-4.6.5-7 2.9-7.5 7.5-.5-4.6-2.9-7-7.5-7.5 4.6-.5 7-2.9 7.5-7.5zm8 11c.3 2.3 1.4 3.4 3.5 3.7-2.1.3-3.2 1.4-3.5 3.8-.3-2.4-1.4-3.5-3.5-3.8 2.1-.3 3.2-1.4 3.5-3.7z"/></svg>
+      <span>עוזר AI</span>
+    </button>
+    <button class="nav-btn" data-tab="profile">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9zm0 2c-4.4 0-8 2.2-8 5v2h16v-2c0-2.8-3.6-5-8-5z"/></svg>
+      <span>פרופיל</span>
+    </button>
+  </nav>
 
   <!-- Lists Modal -->
   <div class="modal-overlay hidden" id="listsOverlay">
@@ -294,38 +424,6 @@
           <button class="small-btn danger" id="deleteListBtn">🗑️ מחיקת הרשימה</button>
         </section>
 
-        <section class="acc-section">
-          <h3>החשבון שלי</h3>
-          <div class="acc-card">
-            <div class="acc-field-row">
-              <input type="text" id="usernameInput" maxlength="30" placeholder="השם שלך" autocomplete="off">
-              <button class="small-btn" id="saveUsernameBtn">שמור</button>
-            </div>
-            <div class="acc-label">מזהה המשתמש שלך</div>
-            <div class="acc-id-row">
-              <code class="acc-id" id="fullUserId" dir="ltr"></code>
-              <button class="small-btn" id="copyFullIdBtn">📋 העתק</button>
-            </div>
-            <div class="acc-status" id="syncStatusText"></div>
-          </div>
-        </section>
-
-        <section class="acc-section">
-          <h3>מכשיר נוסף</h3>
-          <div class="acc-card">
-            <div class="acc-label">כדי לפתוח את אותו חשבון בטלפון או במחשב נוסף, העתיקו את קוד החיבור והזינו אותו שם.
-              <strong>אל תשתפו את הקוד</strong> — הוא כמו סיסמה. לשיתוף רשימה משתמשים בקישור ההזמנה.</div>
-            <div class="acc-id-row hidden" id="linkCodeRow">
-              <code class="acc-id" id="linkCode" dir="ltr"></code>
-              <button class="small-btn" id="copyLinkCodeBtn">📋 העתק</button>
-            </div>
-            <div class="acc-actions">
-              <button class="small-btn" id="showLinkCodeBtn">הצג קוד חיבור</button>
-              <button class="small-btn danger" id="logoutBtn">התנתקות מהמכשיר</button>
-            </div>
-          </div>
-        </section>
-
       </div>
     </div>
   </div>
@@ -382,6 +480,7 @@
 <script src="item-parser.js"></script>
 <script src="quick-add.js"></script>
 <script src="voice.js"></script>
+<script src="ai-chat.js"></script>
 <script src="socket-client.js"></script>
 <script src="pwa-update.js"></script>
 <script src="app.js"></script>

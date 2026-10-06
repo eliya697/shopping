@@ -24,6 +24,15 @@ Cat.learned = {};
 check("sanitizeOrder fills missing", Cat.sanitizeOrder(["dairy", "bogus", "dairy"]).slice(0, 2), ["dairy", "produce"]);
 check("sanitizeOrder length", Cat.sanitizeOrder([]).length, Cat.LIST.length);
 
+// ---- emojiFor
+const emojis = {
+  "חלב": "🥛", "לחם": "🍞", "עגבניה": "🍅", "עגבניות שרי": "🍅", "שוקולד חלב": "🍫", "מיץ תפוזים": "🧃",
+  "פלפל שחור": "🧂", "פלפל אדום": "🫑", "חזה עוף": "🍗", "תפוחי אדמה": "🥔", "תפוחים": "🍎", "שמנת": "🥛",
+  "שמן זית": "🫒", "והביצים": "🥚", "נייר טואלט": "🧻", "חמים": "🛒", "סוכר": "🥫",
+};
+for (const [name, emoji] of Object.entries(emojis)) check(`emojiFor ${name}`, Cat.emojiFor(name), emoji);
+check("emojiFor uses given category", Cat.emojiFor("משהו", "dairy"), "🧀");
+
 // ---- parseSingle
 const singles = {
   "חלב": { name: "חלב", quantity: "" },

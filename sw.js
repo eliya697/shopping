@@ -21,6 +21,7 @@ const APP_SHELL = [
   "./item-parser.js",
   "./quick-add.js",
   "./voice.js",
+  "./ai-chat.js",
   "./socket-client.js",
   "./pwa-update.js",
   "./vendor/socket.io.min.js",

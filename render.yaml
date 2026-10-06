@@ -21,3 +21,6 @@ services:
       # Admin dashboard (admin.html). At least 16 random characters.
       - key: ADMIN_SECRET_KEY
         sync: false
+      # AI assistant tab (Google Gemini). Optional: without it the tab says it's not configured.
+      - key: GEMINI_API_KEY
+        sync: false

@@ -8,6 +8,7 @@ const { Server } = require("socket.io");
 const store = require("./db");
 const attachSockets = require("./sockets");
 const adminRouter = require("./admin");
+const aiRouter = require("./ai");
 
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -27,11 +28,12 @@ function logEnvDiagnostics() {
       ? `set (${env.TURSO_DATABASE_URL.replace(/^(\w+:\/\/[^/?]+).*$/, "$1")})`
       : "MISSING — using a local SQLite file" + (env.RENDER ? " (DATA WILL BE LOST on Render)" : "")}`,
     `TURSO_AUTH_TOKEN: ${secret("TURSO_AUTH_TOKEN")}`,
+    `GEMINI_API_KEY: ${env.GEMINI_API_KEY ? `set (${env.GEMINI_API_KEY.length} chars)` : "MISSING — AI assistant disabled"}${env.GEMINI_MODEL ? `, model ${env.GEMINI_MODEL}` : ""}`,
     ...adminRouter.describeAdminConfig().lines,
   ];
   // Near-misses like "ADMIN_SECRET_KEY " or "admin_secret_key" are the usual reason a key "isn't set".
-  const expected = new Set(["ADMIN_SECRET_KEY", "ADMIN_EMAIL", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN"]);
-  const lookalikes = Object.keys(env).filter((k) => /admin|secret|turso/i.test(k) && !expected.has(k));
+  const expected = new Set(["ADMIN_SECRET_KEY", "ADMIN_EMAIL", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN", "GEMINI_API_KEY", "GEMINI_MODEL"]);
+  const lookalikes = Object.keys(env).filter((k) => /admin|secret|turso|gemini/i.test(k) && !expected.has(k));
   if (lookalikes.length) lines.push(`similar variable names present: ${lookalikes.map((k) => JSON.stringify(k)).join(", ")}`);
   lines.forEach((l) => console.log(`[env] ${l}`));
 }
@@ -68,6 +70,7 @@ const sockets = attachSockets(io);
 
 app.set("trust proxy", 1); // Render/Railway/Fly sit behind a proxy; needed for req.ip
 app.use(cors(corsOptions));
+app.use("/api/ai", aiRouter()); // before the global parser: chat history needs a larger body limit
 app.use(express.json({ limit: "10kb" }));
 
 app.get("/", (_req, res) => res.type("text").send("Shopping list server is running."));

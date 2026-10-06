@@ -1,14 +1,19 @@
-# 🛒 Shopping List PWA
+# 🛒 Shopping List PWA + Android app
 
-An offline-first shopping list (Hebrew, RTL) with multiple real-time shared lists, smart supermarket sorting, quick-add, voice input and in-app update prompts.
+An offline-first shopping list (Hebrew, RTL, dark Listonic-style UI) with multiple real-time shared lists, a Gemini-powered meal-planning assistant, smart supermarket sorting, quick-add, voice input and in-app update prompts.
 
-- **Frontend:** vanilla JS, served from GitHub Pages
+- **Frontend:** vanilla JS, served from GitHub Pages, and wrapped as a native Android app with **Capacitor**
 - **Backend:** Node.js + Express + Socket.io + libSQL/**Turso** (hosted SQLite; a local file in development), hosted on Render
+- **AI:** Google Gemini via its REST API (`/api/ai/chat`)
 
 ## Features
 
 | | |
 |---|---|
+| **Three tabs** | Bottom navigation: 📋 *Lists*, ✦ *AI assistant*, 👤 *Profile / settings* (account, sync status, theme, templates, aisle order, device linking). Dark theme by default, light theme in Profile. |
+| **AI assistant** | Chat with Gemini about meals, recipes, what's in season, budget shopping. Suggested products come back as cards with **הוסף לרשימה** per item and **הוסף הכל** per recipe. Quick-prompt chips, voice questions, and the open items on your list are sent as context so it doesn't suggest what you already have. Signed-in users only. |
+| **Item icons** | Every item gets an emoji from its name (“חלב” → 🥛, “לחם” → 🍞, “עגבניה” → 🍅), falling back to its section's icon. |
+| **Checked items drawer** | Checked items collapse into a *פריטים שסומנו (n)* drawer at the bottom of the list, with a 🧹 clear button. A search always shows its checked matches. |
 | **Multiple lists** | Create lists (“קניות שבועיות”, “בית מרקחת”, “ארוחת שבת”…), switch from the title in the header, rename or delete them. |
 | **Sharing** | Invite by **link or 8-character code** (`?join=ABCD2345`), or by user ID. Members, joins, renames and deletions sync live. |
 | **Quantity & notes** | Free-text quantity (“3”, “1 ק״ג”, “2 חבילות”) and notes (“אורגני בלבד”). Tap an item to edit. The row shows a small quantity pill and a one-line note. |
@@ -24,10 +29,11 @@ Typed input understands quantities too: `2 חלב`, `חלב x2`, `חצי קיל�
 
 ```
 shop app/
-├── index.html              # UI: list, sheets (lists, item, share, quick-add, aisle order), update banner
-├── style.css
-├── app.js                  # state, rendering (keyed DOM patching), actions, sync wiring
-├── categories.js           # supermarket sections, auto-categorize, default walking order
+├── index.html              # UI: Lists / AI / Profile tabs, bottom nav, sheets, update banner
+├── style.css               # dark (default) + light theme tokens
+├── app.js                  # state, rendering (keyed DOM patching), actions, sync wiring, tabs
+├── ai-chat.js              # AI assistant tab: chat UI, /api/ai/chat client, "add to list" cards
+├── categories.js           # supermarket sections, auto-categorize, item emojis, default walking order
 ├── item-parser.js          # "2 ק״ג עגבניות" and dictated lists -> items
 ├── quick-add.js            # purchase history + frequency/recency ranking
 ├── voice.js                # Web Speech API wrapper
@@ -40,8 +46,13 @@ shop app/
 ├── tests/parser.test.js    # categorizer + parser tests:  node tests/parser.test.js
 ├── .github/workflows/deploy.yml  # Pages deploy; stamps a new version into sw.js
 ├── render.yaml             # Render blueprint for the backend
+├── package.json            # Capacitor dependencies + build scripts (the web app itself has no build)
+├── capacitor.config.json   # Android shell: app id, splash, system bars
+├── scripts/build-web.js    # copies the frontend into www/ for Capacitor
+├── android/                # generated Capacitor Android project (Android Studio opens this)
 └── server/
     ├── server.js           # Express app, CORS, /health, /api/register, /api/me
+    ├── ai.js               # /api/ai/chat: Gemini call, auth, rate limit, response sanitizing
     ├── sockets.js          # Socket.io auth + events
     ├── admin.js            # /api/admin/* (login, health, users, lists, cleanup, export)
     ├── db.js               # libSQL/Turso schema, additive migrations, queries
@@ -119,6 +130,23 @@ The server listens right away and connects to the database in the background, re
 
 Server-side failures during a call answer `{ ok: false, retryable: true }`. The outbox keeps those operations and retries them, and a failed `join:list` never makes the app forget a list.
 
+A device that already has items never loses them to an empty server answer. If the server reports a list as empty while the device's cached copy has items (cleared from another device, or server data lost), the app shows them as cleared but offers **שחזור** to put the device's copy back. An empty `lists` array from the server is ignored, since every account always has at least one list.
+
+### AI assistant
+
+`POST /api/ai/chat` with `Authorization: Bearer <device token>` and `{ message, history: [{ role: "user"|"model", text }], listItems: ["חלב", …] }` returns:
+
+```json
+{ "reply": "conversational Hebrew text",
+  "sections": [{ "title": "שקשוקה", "items": [{ "name": "ביצים", "quantity": "6", "category": "dairy" }] }] }
+```
+
+- Gemini is called with a system prompt (Hebrew meal-planning and shopping expert, today's date in Israel for seasonality) and a JSON `responseSchema`, so the product list is structured, not parsed out of prose. The server cleans the answer anyway: unknown categories become `misc`, duplicates and empty sections are dropped.
+- Only registered users can call it, with **40 questions per user per hour**, so the API key can't be drained anonymously.
+- The conversation is stored on the device (`localStorage`); the last 12 turns are sent as history.
+- Errors are explicit: `AI_DISABLED` (no `GEMINI_API_KEY` on the server), `INVALID_TOKEN`, `RATE_LIMITED`, `AI_FAILED`. During a cold start (`SERVER_UNAVAILABLE`) the app retries by itself.
+- Model: `gemini-2.5-flash` unless `GEMINI_MODEL` is set. `GET /api/ai/status` returns `{ enabled }`.
+
 ### Admin dashboard
 
 `admin.html` isn't linked from the app. Log in with the admin email and `ADMIN_SECRET_KEY`. You get a 12-hour HMAC-signed session token, stored in `localStorage` and sent as `Authorization: Bearer …`. Failed logins are limited to 5 per 15 minutes per IP.
@@ -175,6 +203,8 @@ Users on the old version (cache `shopping-list-v2`) have no banner code yet, so 
    | `TURSO_DATABASE_URL` | `libsql://<db>-<org>.turso.io` (see below) |
    | `TURSO_AUTH_TOKEN` | the database token from `turso db tokens create` |
    | `ADMIN_SECRET_KEY` | 16+ random characters; enables `admin.html` |
+   | `GEMINI_API_KEY` | from [Google AI Studio](https://aistudio.google.com/apikey); enables the AI tab |
+   | `GEMINI_MODEL` | optional, defaults to `gemini-2.5-flash` |
 
    `PORT` is set by Render automatically.
 4. After the deploy, open `https://<your-service>.onrender.com/health` and check that it returns `{"ok":true,...}`.
@@ -206,11 +236,31 @@ With `BACKEND_URL` empty, the app runs exactly as before: local-only, with no ac
 2. Commit and push to `main`. The **Deploy to GitHub Pages** workflow publishes the site (without `server/`) and stamps the service worker version.
 3. Open `https://eliya697.github.io/shopping/`. Every later push makes installed copies show the update banner.
 
+### 4. Build the Android app (Capacitor)
+
+The Android app bundles the same frontend files (no service worker; updates ship with new APKs) and talks to the same Render backend. Invite links created in the app point to the public web URL (`PUBLIC_URL` in `config.js`).
+
+Requirements: Node 20+, [Android Studio](https://developer.android.com/studio) (it includes the Android SDK and the JDK 21 that Capacitor 8 needs).
+
+```bash
+npm install          # Capacitor packages (repo root)
+npm run android      # copies the web files into www/, syncs them into android/, opens Android Studio
+```
+
+In Android Studio, press ▶ to run on a device or emulator, or use **Build → Generate Signed App Bundle / APK** for a release. Run `npm run cap:sync` after every web change.
+
+- **Theme:** dark window and splash (`#121212`) in `android/app/src/main/res/values/styles.xml` + `colors.xml`, so the app never flashes white on launch.
+- **Full screen:** no action bar, edge-to-edge (`EdgeToEdge.enable` in `MainActivity`). The page background shows behind the status bar, and Capacitor's `SystemBars` plugin passes the bar sizes to CSS as `--safe-area-inset-*`. The status-bar icon color follows the in-app theme.
+- **Keyboard:** `adjustResize`, so the add bar and chat input stay above the keyboard.
+- **Back button:** closes the open sheet, then returns to the Lists tab, then exits.
+- **Icons:** the generated project uses Capacitor's default launcher icon. Replace it with `npx @capacitor/assets generate` (from a 1024×1024 `assets/icon.png`) or Android Studio's *Image Asset* tool.
+- **Voice input** is hidden in the Android app: Android's WebView has no Web Speech API. A native speech-recognition plugin would be needed to bring it back.
+
 ## Local development
 
 ```bash
 cd server && npm install && npm run dev      # backend on http://localhost:3000 (reads server/.env, see .env.example)
-cd server && npm test                        # socket tests against the running backend
+cd server && npm test                        # socket + API tests against the running backend
 node tests/parser.test.js                    # parser/categorizer tests
 python -m http.server 5173                   # frontend on http://localhost:5173
 ```
