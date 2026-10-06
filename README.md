@@ -15,7 +15,8 @@ An offline-first shopping list (Hebrew, RTL, dark Listonic-style UI) with multip
 | **Item icons** | Every item gets an emoji from its name (“חלב” → 🥛, “לחם” → 🍞, “עגבניה” → 🍅), falling back to its section's icon. |
 | **Checked items drawer** | Checked items collapse into a *פריטים שסומנו (n)* drawer at the bottom of the list, with a 🧹 clear button. A search always shows its checked matches. |
 | **Multiple lists** | Create lists (“קניות שבועיות”, “בית מרקחת”, “ארוחת שבת”…), switch from the title in the header, rename or delete them. |
-| **Sharing** | Invite by **link or 8-character code** (`?join=ABCD2345`), or by user ID. Members, joins, renames and deletions sync live. |
+| **Sharing** | One tap opens the phone's share sheet (`navigator.share`, or the native sheet in the Android app), with **WhatsApp**, **SMS** and **copy link** buttons as fallbacks. The link (`…/join/?code=ABCD2345`) joins the list automatically. Someone without an account gets one created on the spot (named *אורח/ת*, and the app prompts them to set their name), so joining takes no typing. Members, joins, renames and deletions sync live. |
+| **Device pairing** | Profile → *חיבור מכשיר נוסף* shows a one-time **6-digit code** and a **QR code** (valid 5 minutes). Scan it with the new phone's camera, or type the digits under *יש לי חשבון במכשיר אחר*. No IDs or tokens are ever shown in the UI. |
 | **Quantity & notes** | Free-text quantity (“3”, “1 ק״ג”, “2 חבילות”) and notes (“אורגני בלבד”). Tap an item to edit. The row shows a small quantity pill and a one-line note. |
 | **Smart categories** | 11 supermarket sections, auto-detected from the name. The head noun wins (“מיץ תפוזים” → drinks), and corrections you make are remembered. |
 | **Store layout** | 🧭 toggle groups the list by aisle along a walking path: produce first, chilled and frozen last so they stay cold. ⚙️ reorders the aisles for your store. |
@@ -32,7 +33,8 @@ shop app/
 ├── index.html              # UI: Lists / AI / Profile tabs, bottom nav, sheets, update banner
 ├── style.css               # dark (default) + light theme tokens
 ├── app.js                  # state, rendering (keyed DOM patching), actions, sync wiring, tabs
-├── ai-chat.js              # AI assistant tab: chat UI, /api/ai/chat client, "add to list" cards
+├── ai-chat.js              # AI assistant tab: chat UI, cold-start-aware /api/ai/chat client, "add to list" cards
+├── join/index.html         # invite deep link (…/join/?code=X) -> app with ?join=X
 ├── categories.js           # supermarket sections, auto-categorize, item emojis, default walking order
 ├── item-parser.js          # "2 ק״ג עגבניות" and dictated lists -> items
 ├── quick-add.js            # purchase history + frequency/recency ranking
@@ -43,6 +45,7 @@ shop app/
 ├── config.js               # BACKEND_URL
 ├── admin.html / admin.js   # hidden admin dashboard (developer only)
 ├── vendor/socket.io.min.js # Socket.io client (same-origin, so it works offline)
+├── vendor/qrcode.js        # QR generator for device pairing (qrcode-generator, MIT)
 ├── tests/parser.test.js    # categorizer + parser tests:  node tests/parser.test.js
 ├── .github/workflows/deploy.yml  # Pages deploy; stamps a new version into sw.js
 ├── render.yaml             # Render blueprint for the backend
@@ -52,7 +55,8 @@ shop app/
 ├── android/                # generated Capacitor Android project (Android Studio opens this)
 └── server/
     ├── server.js           # Express app, CORS, /health, /api/register, /api/me
-    ├── ai.js               # /api/ai/chat: Gemini call, auth, rate limit, response sanitizing
+    ├── ai.js               # /api/ai/chat: Gemini call with model fallback + retries, auth, rate limit
+    ├── pairing.js          # /api/pair: 6-digit device pairing codes
     ├── sockets.js          # Socket.io auth + events
     ├── admin.js            # /api/admin/* (login, health, users, lists, cleanup, export)
     ├── db.js               # libSQL/Turso schema, additive migrations, queries
@@ -67,11 +71,24 @@ shop app/
 
 | Value | Public? | Purpose |
 |---|---|---|
-| `userId` (UUID v4) | ✅ share it | Others can share a list with you by ID |
-| `token` (256-bit random) | ❌ secret | Authenticates the socket; shown in the app as the **device link code** |
+| `userId` (UUID v4) | internal | Identifies the user; never shown in the app |
+| `token` (256-bit random) | ❌ secret | Authenticates the socket and API calls; never shown in the app |
 | `listId` | – | Your first list, created with the account |
 
-The server stores only a SHA-256 hash of the token. To use the same account on a second device, go to **Share → Another device**, copy the link code, and on the new device pick **"I already have an account"**.
+The server stores only a SHA-256 hash of the token.
+
+### Device pairing
+
+| Endpoint | |
+|---|---|
+| `POST /api/pair/start` *(Bearer token)* | `{ code: "123456", expiresAt, ttlMs }`. A new code replaces the account's previous one. |
+| `POST /api/pair/redeem { code }` | `{ token, user, lists }`, or 404 `INVALID_CODE` |
+
+Because the database only has the token's hash, the code carries the signed-in device's token **in server memory**. Codes are single use, expire after 5 minutes, and vanish on a restart. Wrong guesses are limited to 8 per IP and 60 in total per 10 minutes, so the million-code space can't be swept within a code's lifetime. The QR code encodes `…/?pair=123456`: opening it on a device without an account signs it in automatically, and on a device that's already signed in it does nothing.
+
+### Invite deep links
+
+`…/join/?code=ABCD2345` is served by `join/index.html`, which has link-preview meta tags for WhatsApp/SMS and forwards to `…/?join=ABCD2345`. For installed users the service worker does that redirect itself. The app then joins as soon as the socket is online. You can also paste a whole link (or just the code) in *My lists → join*.
 
 ### Data model (SQLite dialect, stored in Turso)
 
@@ -144,8 +161,10 @@ A device that already has items never loses them to an empty server answer. If t
 - Gemini is called with a system prompt (Hebrew meal-planning and shopping expert, today's date in Israel for seasonality) and a JSON `responseSchema`, so the product list is structured, not parsed out of prose. The server cleans the answer anyway: unknown categories become `misc`, duplicates and empty sections are dropped.
 - Only registered users can call it, with **40 questions per user per hour**, so the API key can't be drained anonymously.
 - The conversation is stored on the device (`localStorage`); the last 12 turns are sent as history.
-- Errors are explicit: `AI_DISABLED` (no `GEMINI_API_KEY` on the server), `INVALID_TOKEN`, `RATE_LIMITED`, `AI_FAILED`. During a cold start (`SERVER_UNAVAILABLE`) the app retries by itself.
-- Model: `gemini-2.5-flash` unless `GEMINI_MODEL` is set. `GET /api/ai/status` returns `{ enabled }`.
+- **Resilient Gemini client:** on startup the server lists the models the key can use. The Render log then shows either `[ai] Gemini key OK — … using <model>` or the exact reason it failed. Each question tries `GEMINI_MODEL`, then `gemini-flash-latest`, `gemini-2.5-flash` and `gemini-2.0-flash`, skipping retired ones. Transient failures (503 "overloaded", 500, timeouts, malformed JSON) are retried with backoff. If Gemini rejects the JSON schema, the question is retried without it, since the prompt also spells out the format. Everything fits in a 45-second budget. Failed calls don't count against the user's hourly limit.
+- **Errors say why:** `AI_DISABLED` (no key), `INVALID_TOKEN`, `RATE_LIMITED` (our 40/hour), `AI_QUOTA` (Gemini's quota), or `AI_FAILED` with a `reason` (`invalid_key`, `forbidden`, `model_not_found`, `overloaded`, `timeout`, `bad_response`). The app shows a specific Hebrew message for each.
+- **Cold start:** while Render wakes up (network errors, proxy 502/503/504, `SERVER_UNAVAILABLE`), the chat shows *השרת מתעורר, מיד מתחברים…* and keeps retrying for up to ~100 s instead of failing.
+- **Diagnose in production:** `GET /api/ai/status` returns `{ enabled, ok, model, reason, checkedAt }` (no secrets). If `reason` is `invalid_key`, re-paste `GEMINI_API_KEY` in Render (surrounding spaces and quotes are stripped automatically).
 
 ### Admin dashboard
 
@@ -260,7 +279,7 @@ In Android Studio, press ▶ to run on a device or emulator, or use **Build → 
 
 ```bash
 cd server && npm install && npm run dev      # backend on http://localhost:3000 (reads server/.env, see .env.example)
-cd server && npm test                        # socket + API tests against the running backend
+cd server && npm test                        # Gemini client tests (fake Gemini) + socket/API/pairing tests against the running backend
 node tests/parser.test.js                    # parser/categorizer tests
 python -m http.server 5173                   # frontend on http://localhost:5173
 ```

@@ -25,6 +25,7 @@ const APP_SHELL = [
   "./socket-client.js",
   "./pwa-update.js",
   "./vendor/socket.io.min.js",
+  "./vendor/qrcode.js",
   "./manifest.json",
   "./icon.svg",
 ];
@@ -67,6 +68,16 @@ self.addEventListener("fetch", (event) => {
 
   // The admin dashboard is network-only: never cached, never swapped for the app shell.
   if (/\/admin(\.html|\.js)?$/.test(url.pathname)) return;
+
+  // Invite deep links (…/join/?code=X): hand the code to the app. Serving the shell at
+  // /join/ itself would break its relative script and style paths.
+  if (request.mode === "navigate" && /\/join\/?$/.test(url.pathname)) {
+    const code = url.searchParams.get("code") || url.searchParams.get("join") || "";
+    const target = new URL("./", self.registration.scope);
+    if (code) target.searchParams.set("join", code);
+    event.respondWith(Response.redirect(target.href, 302));
+    return;
+  }
 
   // App navigations: serve the precached shell (versioned together with the JS/CSS).
   if (request.mode === "navigate") {

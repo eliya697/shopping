@@ -29,6 +29,7 @@ const FILES = [
   "sw.js",
   "app.js",
   "vendor/socket.io.min.js",
+  "vendor/qrcode.js",
 ];
 
 fs.rmSync(OUT, { recursive: true, force: true });

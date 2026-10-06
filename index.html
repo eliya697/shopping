@@ -147,43 +147,53 @@
     </header>
 
     <main class="tab-body">
-      <section class="acc-section hidden" id="profileGuestSection">
-        <div class="acc-card">
-          <div class="profile-hero">☁️</div>
-          <div class="acc-label">צרו חשבון כדי לסנכרן את הרשימות בין מכשירים, לשתף אותן בזמן אמת ולהשתמש בעוזר החכם. הפריטים שכבר ברשימה יישמרו.</div>
-          <button class="small-btn primary" id="profileSyncBtn">הפעלת סנכרון ושיתוף</button>
+      <!-- Guest: one clear call to action -->
+      <section class="card hidden" id="profileGuestSection">
+        <div class="card-hero">
+          <div class="hero-icon">☁️</div>
+          <div class="hero-title">סנכרון ושיתוף</div>
+          <div class="hero-text">צרו חשבון כדי לסנכרן בין מכשירים, לשתף רשימות עם בני הבית ולהשתמש בעוזר החכם. רק שם, בלי סיסמה.</div>
+          <button class="btn btn-primary btn-block" id="profileSyncBtn">יצירת חשבון</button>
+          <button class="btn btn-ghost btn-block" id="profilePairBtn">יש לי חשבון במכשיר אחר</button>
         </div>
       </section>
 
-      <section class="acc-section hidden" id="profileAccountSection">
-        <h3>החשבון שלי</h3>
-        <div class="acc-card">
-          <div class="acc-field-row">
-            <input type="text" id="usernameInput" maxlength="30" placeholder="השם שלך" autocomplete="off">
-            <button class="small-btn" id="saveUsernameBtn">שמור</button>
+      <!-- Signed in: who you are -->
+      <section class="card profile-card hidden" id="profileAccountSection">
+        <div class="avatar" id="profileAvatar" aria-hidden="true"></div>
+        <div class="profile-main">
+          <label class="profile-label" for="usernameInput">השם שלך</label>
+          <input type="text" class="name-input" id="usernameInput" maxlength="30" placeholder="השם שלך" autocomplete="off" enterkeyhint="done">
+          <div class="profile-sub" id="syncStatusText"></div>
+        </div>
+        <button class="btn btn-primary btn-sm hidden" id="saveUsernameBtn">שמירה</button>
+      </section>
+
+      <section class="settings-group hidden" id="profileSyncSection">
+        <h3 class="group-title">סנכרון</h3>
+        <div class="card card-list">
+          <div class="row">
+            <span class="row-icon">🔄</span>
+            <div class="row-main">
+              <div class="row-title">מצב סנכרון</div>
+              <div class="row-sub" id="syncDetailText"></div>
+            </div>
+            <button class="btn btn-soft btn-sm" id="syncNowBtn">סנכרון עכשיו</button>
           </div>
-          <div class="acc-label">מזהה המשתמש שלך (לשיתוף רשימות)</div>
-          <div class="acc-id-row">
-            <code class="acc-id" id="fullUserId" dir="ltr"></code>
-            <button class="small-btn" id="copyFullIdBtn">📋 העתק</button>
-          </div>
+          <button class="row row-btn" id="pairDeviceBtn">
+            <span class="row-icon">📱</span>
+            <div class="row-main">
+              <div class="row-title">חיבור מכשיר נוסף</div>
+              <div class="row-sub">קוד בן 6 ספרות או סריקת QR</div>
+            </div>
+            <span class="row-chev">‹</span>
+          </button>
         </div>
       </section>
 
-      <section class="acc-section hidden" id="profileSyncSection">
-        <h3>סנכרון</h3>
-        <div class="acc-card">
-          <div class="acc-status" id="syncStatusText"></div>
-          <div class="acc-label" id="syncDetailText"></div>
-          <div class="acc-actions">
-            <button class="small-btn" id="syncNowBtn">🔄 סנכרון עכשיו</button>
-          </div>
-        </div>
-      </section>
-
-      <section class="acc-section">
-        <h3>מראה</h3>
-        <div class="acc-card">
+      <section class="settings-group">
+        <h3 class="group-title">מראה</h3>
+        <div class="card">
           <div class="segmented" role="radiogroup" aria-label="ערכת נושא">
             <button class="segment" role="radio" data-theme-choice="dark">🌙 כהה</button>
             <button class="segment" role="radio" data-theme-choice="light">☀️ בהיר</button>
@@ -191,28 +201,18 @@
         </div>
       </section>
 
-      <section class="acc-section">
-        <h3>רשימות</h3>
-        <div class="acc-list">
-          <button class="acc-row settings-row hidden" id="profileListsBtn"><span class="settings-icon">📋</span><span class="acc-row-main acc-row-title">הרשימות שלי</span><span class="settings-chev">‹</span></button>
-          <button class="acc-row settings-row" id="profileTemplatesBtn"><span class="settings-icon">⭐</span><span class="acc-row-main acc-row-title">תבניות מועדפות</span><span class="settings-chev">‹</span></button>
-          <button class="acc-row settings-row" id="profileOrderBtn"><span class="settings-icon">🧭</span><span class="acc-row-main acc-row-title">סדר המחלקות בסופר</span><span class="settings-chev">‹</span></button>
+      <section class="settings-group">
+        <h3 class="group-title">רשימות</h3>
+        <div class="card card-list">
+          <button class="row row-btn hidden" id="profileListsBtn"><span class="row-icon">📋</span><div class="row-main"><div class="row-title">הרשימות שלי</div></div><span class="row-chev">‹</span></button>
+          <button class="row row-btn" id="profileTemplatesBtn"><span class="row-icon">⭐</span><div class="row-main"><div class="row-title">תבניות מועדפות</div></div><span class="row-chev">‹</span></button>
+          <button class="row row-btn" id="profileOrderBtn"><span class="row-icon">🧭</span><div class="row-main"><div class="row-title">סדר המחלקות בסופר</div></div><span class="row-chev">‹</span></button>
         </div>
       </section>
 
-      <section class="acc-section hidden" id="deviceSection">
-        <h3>מכשיר נוסף</h3>
-        <div class="acc-card">
-          <div class="acc-label">כדי לפתוח את אותו חשבון בטלפון או במחשב נוסף, העתיקו את קוד החיבור והזינו אותו שם.
-            <strong>אל תשתפו את הקוד</strong> — הוא כמו סיסמה. לשיתוף רשימה משתמשים בקישור ההזמנה.</div>
-          <div class="acc-id-row hidden" id="linkCodeRow">
-            <code class="acc-id" id="linkCode" dir="ltr"></code>
-            <button class="small-btn" id="copyLinkCodeBtn">📋 העתק</button>
-          </div>
-          <div class="acc-actions">
-            <button class="small-btn" id="showLinkCodeBtn">הצג קוד חיבור</button>
-            <button class="small-btn danger" id="logoutBtn">התנתקות מהמכשיר</button>
-          </div>
+      <section class="settings-group hidden" id="deviceSection">
+        <div class="card card-list">
+          <button class="row row-btn row-danger" id="logoutBtn"><span class="row-icon">🚪</span><div class="row-main"><div class="row-title">התנתקות מהמכשיר</div></div></button>
         </div>
       </section>
 
@@ -260,9 +260,9 @@
         <section class="acc-section">
           <h3>הצטרפות לרשימה של מישהו אחר</h3>
           <div class="acc-card">
-            <div class="acc-label">הזינו את קוד ההזמנה שקיבלתם (או פשוט פתחו את הקישור ששלחו לכם)</div>
+            <div class="acc-label">הכי פשוט: פתחו את הקישור ששלחו לכם. אפשר גם להדביק אותו כאן.</div>
             <div class="acc-field-row">
-              <input type="text" id="joinCodeInput" maxlength="12" placeholder="ABCD-2345" dir="ltr" autocomplete="off" spellcheck="false" autocapitalize="characters">
+              <input type="text" id="joinCodeInput" maxlength="200" placeholder="הדביקו קישור או קוד הזמנה" autocomplete="off" spellcheck="false">
               <button class="small-btn primary" id="joinCodeBtn">הצטרפות</button>
             </div>
           </div>
@@ -385,27 +385,29 @@
           </div>
         </section>
 
-        <section class="acc-section">
-          <h3>הזמנה לרשימה</h3>
-          <div class="acc-card">
-            <div class="acc-label">שלחו את הקישור (או את הקוד) למי שתרצו שיצטרף. כל מי שיש לו אותו יכול להצטרף לרשימה.</div>
-            <div class="invite-code" id="inviteCode" dir="ltr">••••-••••</div>
-            <div class="acc-actions">
-              <button class="small-btn primary" id="shareLinkBtn">🔗 שליחת קישור</button>
-              <button class="small-btn" id="copyCodeBtn">📋 העתקת קוד</button>
-              <button class="small-btn" id="regenCodeBtn" title="הקוד הישן יפסיק לעבוד">🔄 קוד חדש</button>
-            </div>
+        <section class="card share-card">
+          <div class="hero-icon">👨‍👩‍👧</div>
+          <div class="hero-title">הזמינו לרשימה</div>
+          <div class="hero-text" id="inviteStatus">מי שיפתח את הקישור יצטרף לרשימה מיד, בלי להקליד כלום.</div>
+          <button class="btn btn-primary btn-block" id="shareLinkBtn">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M18 16a3 3 0 0 0-2.4 1.2l-6.7-3.4a3 3 0 0 0 0-1.6l6.7-3.4A3 3 0 1 0 15 7l-6.7 3.4a3 3 0 1 0 0 3.2L15 17a3 3 0 1 0 3-1z"/></svg>
+            שיתוף קישור הזמנה
+          </button>
+          <div class="share-grid">
+            <button class="share-opt" id="shareWhatsappBtn">
+              <span class="share-opt-icon wa"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5-1.3A10 10 0 1 0 12 2zm5.8 14.1c-.2.7-1.4 1.3-2 1.4-.5.1-1.2.1-1.9-.1-.4-.1-1-.3-1.7-.6-3-1.3-4.9-4.3-5.1-4.5-.1-.2-1.2-1.6-1.2-3.1s.8-2.2 1-2.5c.3-.3.6-.4.8-.4h.6c.2 0 .4 0 .7.5l.9 2.2c.1.2.1.4 0 .6l-.3.5-.4.5c-.1.1-.3.3-.1.6.2.3.7 1.2 1.5 1.9 1 .9 1.9 1.2 2.2 1.3.3.1.4.1.6-.1l.9-1c.2-.3.4-.2.6-.1l2 1c.3.1.5.2.5.3.1.1.1.7-.1 1.3z"/></svg></span>
+              <span>WhatsApp</span>
+            </button>
+            <button class="share-opt" id="shareSmsBtn">
+              <span class="share-opt-icon sms">💬</span>
+              <span>SMS</span>
+            </button>
+            <button class="share-opt" id="copyLinkBtn">
+              <span class="share-opt-icon copy">🔗</span>
+              <span>העתק קישור</span>
+            </button>
           </div>
-        </section>
-
-        <section class="acc-section" id="shareSection">
-          <h3>שיתוף לפי מזהה משתמש</h3>
-          <div class="acc-card">
-            <div class="acc-field-row">
-              <input type="text" id="shareUserIdInput" placeholder="מזהה משתמש" dir="ltr" autocomplete="off" spellcheck="false">
-              <button class="small-btn primary" id="shareBtn">שתף</button>
-            </div>
-          </div>
+          <button class="link-btn muted hidden" id="regenCodeBtn">איפוס קישור ההזמנה</button>
         </section>
 
         <section class="acc-section">
@@ -424,6 +426,24 @@
           <button class="small-btn danger" id="deleteListBtn">🗑️ מחיקת הרשימה</button>
         </section>
 
+      </div>
+    </div>
+  </div>
+
+  <!-- Pair another device -->
+  <div class="modal-overlay hidden" id="pairOverlay">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2>📱 חיבור מכשיר נוסף</h2>
+        <button class="icon-btn" id="closePairBtn" aria-label="סגור">✕</button>
+      </div>
+      <div class="modal-body pair-body">
+        <p class="hero-text">סרקו את הקוד במצלמה של המכשיר החדש, או הזינו בו את 6 הספרות (סנכרון ושיתוף ← יש לי חשבון במכשיר אחר).</p>
+        <div class="qr-box" id="pairQr" aria-label="קוד QR לחיבור"></div>
+        <div class="pair-code" id="pairCode" dir="ltr">••• •••</div>
+        <div class="pair-timer" id="pairTimer"></div>
+        <button class="btn btn-soft btn-block hidden" id="pairRefreshBtn">קוד חדש</button>
+        <p class="pair-note">🔒 הקוד חד-פעמי ותקף ל-5 דקות. אל תשלחו אותו לאחרים — הוא פותח את החשבון שלכם.</p>
       </div>
     </div>
   </div>
@@ -447,11 +467,9 @@
         </div>
 
         <div id="linkPanel" class="hidden">
-          <div class="acc-label">הזינו את קוד החיבור מהמכשיר השני (שיתוף ← מכשיר נוסף)</div>
-          <div class="acc-field-row">
-            <input type="text" id="linkCodeInput" placeholder="קוד חיבור" dir="ltr" autocomplete="off" spellcheck="false">
-            <button class="small-btn primary" id="linkDeviceBtn">התחבר</button>
-          </div>
+          <div class="acc-label">במכשיר שכבר מחובר: <strong class="plain">פרופיל ← חיבור מכשיר נוסף</strong>. הזינו את 6 הספרות שמופיעות שם — או פשוט סרקו את קוד ה-QR עם המצלמה.</div>
+          <input type="text" class="otp-input" id="linkCodeInput" inputmode="numeric" pattern="[0-9]*" maxlength="7" placeholder="000000" dir="ltr" autocomplete="one-time-code" aria-label="קוד חיבור בן 6 ספרות">
+          <button class="btn btn-primary btn-block" id="linkDeviceBtn">התחברות</button>
           <button class="link-btn" id="showRegisterPanelBtn">חזרה ליצירת חשבון</button>
         </div>
 
@@ -476,6 +494,7 @@
 </div>
 <script src="config.js"></script>
 <script src="vendor/socket.io.min.js"></script>
+<script src="vendor/qrcode.js"></script>
 <script src="categories.js"></script>
 <script src="item-parser.js"></script>
 <script src="quick-add.js"></script>

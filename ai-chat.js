@@ -13,9 +13,14 @@
   const STORAGE_KEY = "shoppingList.aiChat.v1";
   const MAX_STORED = 40;
   const HISTORY_TURNS = 12;
-  const REQUEST_TIMEOUT_MS = 90000; // a sleeping Render instance can take ~50s to answer
-  const SLOW_AFTER_MS = 5000;
-  const STARTING_RETRIES = 3;
+  const REQUEST_TIMEOUT_MS = 60000; // one attempt; Gemini itself is retried on the server
+  const WAKE_DEADLINE_MS = 100000; // a sleeping Render instance can take ~50s (sometimes more) to boot
+  const WAKE_HINT_AFTER_MS = 2500; // /health not answering by then = the server is asleep
+
+  const STATUS = {
+    waking: "השרת מתעורר, מיד מתחברים…",
+    thinking: "חושב על תשובה…",
+  };
 
   const PROMPTS = [
     "מה בעונה עכשיו? 🍓",
@@ -24,15 +29,23 @@
     "מזונות עשירים בחלבון לקנייה 🦾",
   ];
 
+  // Keys: the server's `code`, or for AI_FAILED its `reason`.
   const ERRORS = {
     AI_DISABLED: "העוזר החכם עדיין לא הוגדר בשרת (חסר מפתח Gemini).",
     INVALID_TOKEN: "החשבון לא אומת מול השרת. נסו להתחבר מחדש.",
     RATE_LIMITED: "הגעתם למגבלת השאלות לשעה. נסו שוב מאוחר יותר.",
-    SERVER_UNAVAILABLE: "השרת עדיין עולה. נסו שוב בעוד כמה שניות.",
+    AI_QUOTA: "העוזר הגיע למכסת השימוש של Gemini. נסו שוב בעוד כמה דקות.",
+    invalid_key: "מפתח ה-Gemini שמוגדר בשרת לא תקין או חסום, ולכן העוזר לא זמין. (מנהל האפליקציה: בדקו את GEMINI_API_KEY ב-Render.)",
+    forbidden: "מפתח ה-Gemini בשרת לא מורשה להשתמש במודל. (מנהל האפליקציה: בדקו את הגבלות המפתח ב-Google AI Studio.)",
+    model_not_found: "מודל ה-AI לא זמין כרגע. נסו שוב מאוחר יותר.",
+    overloaded: "Gemini עמוס כרגע. נסו שוב בעוד רגע.",
+    timeout: "התשובה לקחה יותר מדי זמן. נסו שוב.",
+    bad_response: "התקבלה תשובה משובשת מהעוזר. נסו לנסח את השאלה מחדש.",
     offline: "אין חיבור לאינטרנט. נסו שוב כשתהיו מחוברים.",
-    timeout: "השרת לא הגיב. נסו שוב.",
+    asleep: "השרת לא התעורר בזמן. נסו שוב בעוד רגע.",
     default: "העוזר לא זמין כרגע. נסו שוב.",
   };
+  const NOT_RETRYABLE = new Set(["AI_DISABLED", "RATE_LIMITED", "AI_QUOTA", "invalid_key", "forbidden"]);
 
   const el = (id) => document.getElementById(id);
   const make = (tag, className, text) => {
@@ -198,32 +211,85 @@
   }
 
   /* ---------- Talking to the server ---------- */
+  function setStatus(text) {
+    const label = document.querySelector("#aiTyping .ai-typing-text");
+    if (label) label.textContent = text || "";
+  }
+
+  /* Resolves true when the server answers /health, false on failure or after `ms`. */
+  async function ping(ms) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    try {
+      const res = await fetch(opts.backendUrl + "/health", { cache: "no-store", signal: controller.signal });
+      return res.ok;
+    } catch (e) {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /*
+   * One question, cold-start aware. A sleeping Render instance shows up as a hanging
+   * /health, a network error, a proxy 502/503/504 without our JSON, or our own
+   * SERVER_UNAVAILABLE while the database connects. All of those mean "wait and
+   * retry" with a friendly status, never an error, until WAKE_DEADLINE_MS.
+   */
   async function request(payload) {
-    for (let attempt = 0; ; attempt++) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-      let res;
-      let body;
-      try {
-        res = await fetch(opts.backendUrl + "/api/ai/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: "Bearer " + opts.getToken() },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        });
-        body = await res.json().catch(() => ({}));
-      } catch (e) {
-        throw { code: e && e.name === "AbortError" ? "timeout" : navigator.onLine === false ? "offline" : "default" };
-      } finally {
-        clearTimeout(timer);
+    const deadline = Date.now() + WAKE_DEADLINE_MS;
+    let waking = false;
+    const showWaking = () => {
+      waking = true;
+      setStatus(STATUS.waking);
+    };
+
+    // Kick the server awake right away and find out whether it is asleep.
+    const hint = setTimeout(showWaking, WAKE_HINT_AFTER_MS);
+    ping(WAKE_DEADLINE_MS).then((up) => {
+      clearTimeout(hint);
+      if (up) setStatus(STATUS.thinking);
+    });
+
+    try {
+      for (let attempt = 0; ; attempt++) {
+        if (navigator.onLine === false) throw { code: "offline" };
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+        let res = null;
+        let body = {};
+        try {
+          res = await fetch(opts.backendUrl + "/api/ai/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: "Bearer " + opts.getToken() },
+            body: JSON.stringify(payload),
+            signal: controller.signal,
+          });
+          body = await res.json().catch(() => ({}));
+        } catch (e) {
+          // Our own timeout means the server is awake but slow: don't resend the same question.
+          if (e && e.name === "AbortError") throw { code: "timeout" };
+          res = null; // network error: most likely the server is still booting
+        } finally {
+          clearTimeout(timer);
+        }
+
+        if (res && res.ok) return body;
+
+        const asleep = !res || (!body.code && [502, 503, 504].includes(res.status)) || body.code === "SERVER_UNAVAILABLE";
+        if (asleep) {
+          if (Date.now() > deadline) throw { code: navigator.onLine === false ? "offline" : "asleep" };
+          if (!waking) showWaking();
+          await ping(10000); // returns as soon as the server answers
+          await sleep(Math.min(1000 * (attempt + 1), 4000));
+          setStatus(STATUS.thinking);
+          continue;
+        }
+        if (body.code === "AI_FAILED") throw { code: body.reason || "default" };
+        throw { code: body.code || (res.status === 401 ? "INVALID_TOKEN" : res.status === 429 ? "RATE_LIMITED" : "default") };
       }
-      if (res.ok) return body;
-      // The database is still connecting after a cold start: wait and retry quietly.
-      if (body.code === "SERVER_UNAVAILABLE" && attempt < STARTING_RETRIES) {
-        await sleep(3000 * (attempt + 1));
-        continue;
-      }
-      throw { code: body.code || (res.status === 401 ? "INVALID_TOKEN" : res.status === 429 ? "RATE_LIMITED" : "default") };
+    } finally {
+      clearTimeout(hint);
     }
   }
 
@@ -241,20 +307,13 @@
     render();
     scrollToEnd();
 
-    const slow = setTimeout(() => {
-      const label = document.querySelector("#aiTyping .ai-typing-text");
-      if (label) label.textContent = "השרת מתעורר, זה יכול לקחת עד דקה…";
-    }, SLOW_AFTER_MS);
-
     try {
       const answer = await request({ message: text, history, listItems: opts.getListNames() });
       messages.push({ role: "model", text: answer.reply || "", sections: answer.sections || [] });
     } catch (e) {
-      const code = e && e.code;
-      const retryable = code !== "AI_DISABLED" && code !== "RATE_LIMITED";
-      messages.push({ role: "model", error: true, text: ERRORS[code] || ERRORS.default, retryText: retryable ? text : null });
+      const code = (e && e.code) || "default";
+      messages.push({ role: "model", error: true, text: ERRORS[code] || ERRORS.default, retryText: NOT_RETRYABLE.has(code) ? null : text });
     } finally {
-      clearTimeout(slow);
       busy = false;
       save();
       render();

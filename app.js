@@ -149,6 +149,7 @@
   }
 
   const norm = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   /* ---------- DOM refs ---------- */
   const el = (id) => document.getElementById(id);
@@ -180,10 +181,12 @@
     "itemNotesInput", "categoryGrid", "itemMeta", "deleteItemBtn", "saveItemBtn",
     // share / account sheet
     "accountOverlay", "accountTitle", "closeAccountBtn", "listSettingsSection", "listNameInput",
-    "saveListNameBtn", "inviteCode", "shareLinkBtn", "copyCodeBtn", "regenCodeBtn", "shareSection",
-    "shareUserIdInput", "shareBtn", "membersTitle", "membersList", "sharedWithMeSection", "sharedByText",
-    "leaveListBtn", "deleteListSection", "deleteListBtn", "usernameInput", "saveUsernameBtn", "fullUserId",
-    "copyFullIdBtn", "syncStatusText", "linkCodeRow", "linkCode", "copyLinkCodeBtn", "showLinkCodeBtn",
+    "saveListNameBtn", "inviteStatus", "shareLinkBtn", "shareWhatsappBtn", "shareSmsBtn", "copyLinkBtn",
+    "regenCodeBtn", "membersTitle", "membersList", "sharedWithMeSection", "sharedByText",
+    "leaveListBtn", "deleteListSection", "deleteListBtn", "usernameInput", "saveUsernameBtn", "syncStatusText",
+    // profile & device pairing
+    "profileAvatar", "profilePairBtn", "pairDeviceBtn", "pairOverlay", "closePairBtn", "pairQr", "pairCode",
+    "pairTimer", "pairRefreshBtn",
     "logoutBtn",
     // welcome
     "welcomeOverlay", "closeWelcomeBtn", "welcomeText", "registerPanel", "linkPanel", "welcomeNameInput",
@@ -1281,16 +1284,25 @@
     });
     if (!signedIn) return;
 
-    if (document.activeElement !== $.usernameInput) $.usernameInput.value = account.username;
-    $.fullUserId.textContent = account.userId;
+    const name = account.username || "";
+    $.profileAvatar.textContent = (name.trim()[0] || "?").toUpperCase();
+    if (document.activeElement !== $.usernameInput) $.usernameInput.value = name;
+    updateSaveNameBtn();
     $.syncStatusText.innerHTML = "";
     const dot = document.createElement("span");
     dot.className = "sync-dot " + syncStatus;
     $.syncStatusText.appendChild(dot);
-    $.syncStatusText.appendChild(document.createTextNode(STATUS_TEXT[syncStatus]));
+    const short = { online: "מחובר", connecting: "מתחבר…", waking: "השרת מתעורר…", offline: "לא מקוון" }[syncStatus];
+    const listCount = lists.length > 1 ? ` · ${lists.length} רשימות` : "";
+    $.syncStatusText.appendChild(document.createTextNode(short + listCount));
     $.syncDetailText.textContent = pendingCount
       ? `${pendingCount} שינויים שמורים במכשיר וממתינים לשליחה`
       : syncStatus === "online" ? "כל השינויים נשמרו בשרת" : "הרשימות שמורות במכשיר וזמינות גם בלי חיבור";
+  }
+
+  function updateSaveNameBtn() {
+    const typed = $.usernameInput.value.trim();
+    $.saveUsernameBtn.classList.toggle("hidden", !account || !typed || typed === account.username);
   }
 
   /* ---------- Bottom navigation ---------- */
@@ -1313,11 +1325,7 @@
     window.scrollTo(0, 0);
     if (tab === "lists") render();
     if (tab === "ai") AIChat.onShow();
-    if (tab === "profile") {
-      $.linkCodeRow.classList.add("hidden");
-      $.showLinkCodeBtn.classList.remove("hidden");
-      renderProfile();
-    }
+    if (tab === "profile") renderProfile();
   }
   navButtons.forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 
@@ -1391,8 +1399,15 @@
     showToast(`הרשימה "${list.name}" נוצרה`);
   }
 
+  /* "ABCD2345", "abcd-2345" or a whole invite link -> the code. */
+  function extractInviteCode(input) {
+    const text = String(input || "").trim();
+    const fromUrl = /[?&](?:code|join)=([A-Za-z0-9-]+)/.exec(text);
+    return fromUrl ? fromUrl[1] : text;
+  }
+
   async function joinByCode(code) {
-    const clean = String(code || "").trim();
+    const clean = extractInviteCode(code);
     if (!clean) {
       showToast("הזינו קוד הזמנה");
       return false;
@@ -1408,41 +1423,77 @@
     $.joinCodeInput.value = "";
     switchList(res.listId);
     showToast(res.already ? "כבר חברים ברשימה הזו" : `הצטרפת לרשימה "${activeListName()}" 🎉`, 3000);
+    suggestRename();
     return true;
   }
 
-  /* ---------- Share / account sheet ---------- */
+  /* ---------- Share sheet: native share, WhatsApp, SMS, copy ---------- */
   let inviteCode = null;
+  let inviteLoading = false;
 
-  const formatCode = (code) => (code ? code.slice(0, 4) + "-" + code.slice(4) : "••••-••••");
-  // Inside the Android app the page lives on https://localhost, so invites point at the public web app.
-  const inviteBase = () => (Native.isApp && PUBLIC_URL ? PUBLIC_URL : location.origin + location.pathname);
-  const inviteLink = (code) => `${inviteBase()}?join=${code}`;
+  // The app's folder URL ("…/shopping/"). Inside the Android app the page lives on
+  // https://localhost, so links point at the public web app instead.
+  const appBaseUrl = () => (Native.isApp && PUBLIC_URL ? PUBLIC_URL : location.origin + location.pathname.replace(/[^/]*$/, ""));
+  // Deep link: join/index.html (and the service worker) forward it to ?join=CODE, which joins automatically.
+  const inviteLink = (code) => `${appBaseUrl()}join/?code=${encodeURIComponent(code)}`;
+  const inviteText = () => `הצטרפו לרשימת הקניות "${activeListName()}" 🛒`;
+
+  function renderInviteState() {
+    const ready = !!inviteCode;
+    [$.shareLinkBtn, $.shareWhatsappBtn, $.shareSmsBtn, $.copyLinkBtn].forEach((b) => { b.disabled = !ready; });
+    $.regenCodeBtn.disabled = !ready;
+    $.inviteStatus.textContent = ready
+      ? "מי שיפתח את הקישור יצטרף לרשימה מיד, בלי להקליד כלום."
+      : inviteLoading
+        ? (syncStatus === "online" ? "מכין קישור הזמנה…" : "השרת מתעורר, מיד מתחברים…")
+        : "כדי ליצור קישור הזמנה צריך חיבור לשרת. ננסה שוב ברגע שנתחבר.";
+  }
 
   async function loadInviteCode(regenerate = false) {
     const listId = activeListId;
+    inviteLoading = true;
+    renderInviteState();
     const res = await sync.request("list:share_code", { listId, regenerate });
+    inviteLoading = false;
     if (listId !== activeListId) return;
-    inviteCode = res.ok ? res.code : null;
-    $.inviteCode.textContent = res.ok ? formatCode(inviteCode) : "צריך חיבור לשרת";
-    [$.shareLinkBtn, $.copyCodeBtn, $.regenCodeBtn].forEach((b) => { b.disabled = !inviteCode; });
-    if (regenerate && res.ok) showToast("נוצר קוד חדש — הקוד הקודם כבר לא עובד");
+    if (res.ok) inviteCode = res.code;
+    else if (regenerate) needsConnection(res);
+    renderInviteState();
+    if (regenerate && res.ok) showToast("נוצר קישור חדש — הקישור הקודם כבר לא עובד");
+  }
+
+  function openExternal(url) {
+    // In the Android app, Capacitor hands non-app URLs (wa.me, sms:) to the system.
+    if (/^https?:/.test(url) && !Native.isApp) window.open(url, "_blank", "noopener");
+    else location.href = url;
   }
 
   async function shareInviteLink() {
     if (!inviteCode) return;
     const url = inviteLink(inviteCode);
-    const text = `הצטרפו לרשימת הקניות "${activeListName()}"`;
-    if (navigator.share) {
-      try {
-        await navigator.share({ title: activeListName(), text, url });
+    const title = activeListName();
+    const text = inviteText();
+    const nativeShare = Native.isApp && Native.plugin("Share");
+    try {
+      if (nativeShare) {
+        await nativeShare.share({ title, text, url, dialogTitle: "שיתוף הרשימה" });
         return;
-      } catch (e) {
-        if (e && e.name === "AbortError") return;
       }
+      if (navigator.share) {
+        await navigator.share({ title, text, url });
+        return;
+      }
+    } catch (e) {
+      const msg = String((e && (e.name + " " + e.message)) || "");
+      if (/AbortError|cancel/i.test(msg)) return; // the user closed the share sheet
     }
-    copyText(url, "קישור ההזמנה הועתק");
+    copyText(url, "קישור ההזמנה הועתק — הדביקו אותו בצ'אט");
   }
+
+  const shareViaWhatsapp = () => inviteCode && openExternal(`https://wa.me/?text=${encodeURIComponent(`${inviteText()}\n${inviteLink(inviteCode)}`)}`);
+  // "sms:?&body=" works on both Android and iOS.
+  const shareViaSms = () => inviteCode && openExternal(`sms:?&body=${encodeURIComponent(`${inviteText()} ${inviteLink(inviteCode)}`)}`);
+  const copyInviteLink = () => inviteCode && copyText(inviteLink(inviteCode), "קישור ההזמנה הועתק");
 
   function renderAccountModal() {
     if (!account) return;
@@ -1452,7 +1503,6 @@
     $.listSettingsSection.classList.toggle("hidden", !own);
     if (own && document.activeElement !== $.listNameInput) $.listNameInput.value = (listInfo && listInfo.name) || (activeListMeta() || {}).name || "";
     $.regenCodeBtn.classList.toggle("hidden", !own);
-    $.shareSection.classList.toggle("hidden", !own);
     $.deleteListSection.classList.toggle("hidden", !own);
     $.sharedWithMeSection.classList.toggle("hidden", own);
     if (!own) {
@@ -1502,8 +1552,7 @@
 
   function openAccountModal() {
     inviteCode = null;
-    $.inviteCode.textContent = "טוען…";
-    [$.shareLinkBtn, $.copyCodeBtn, $.regenCodeBtn].forEach((b) => { b.disabled = true; });
+    renderInviteState();
     renderAccountModal();
     openSheet($.accountOverlay);
     loadInviteCode();
@@ -1516,32 +1565,6 @@
     if (!res.ok) return needsConnection(res);
     $.listNameInput.blur();
     showToast("שם הרשימה עודכן");
-  }
-
-  async function shareList() {
-    const targetUserId = $.shareUserIdInput.value.trim();
-    if (!targetUserId) {
-      showToast("הדביקו מזהה משתמש");
-      return;
-    }
-    if (targetUserId === account.userId) {
-      showToast("זה המזהה שלך 🙂");
-      return;
-    }
-    $.shareBtn.disabled = true;
-    const res = await sync.request("share:list", { listId: activeListId, targetUserId });
-    $.shareBtn.disabled = false;
-    if (res.ok) {
-      $.shareUserIdInput.value = "";
-      showToast(`הרשימה שותפה עם ${res.member.username} ✓`);
-      return;
-    }
-    const errors = {
-      "user not found": "לא נמצא משתמש עם המזהה הזה",
-      "already shared with this user": "הרשימה כבר משותפת עם המשתמש הזה",
-    };
-    if (errors[res.error]) showToast(errors[res.error]);
-    else needsConnection(res);
   }
 
   async function removeMember(userId) {
@@ -1614,22 +1637,26 @@
   }
 
   function logout() {
-    showConfirm("להתנתק מהחשבון במכשיר הזה? כדי לחזור תצטרכו את קוד החיבור. הרשימה הנוכחית תישאר במכשיר.", () => {
+    showConfirm("להתנתק מהחשבון במכשיר הזה? כדי לחזור תצטרכו קוד חיבור ממכשיר אחר שמחובר לחשבון. אם זה המכשיר היחיד — לא תוכלו לחזור לחשבון. הרשימה הנוכחית תישאר במכשיר.", () => {
       closeSheet($.accountOverlay);
       dropAccount();
       showToast("התנתקת מהחשבון");
     });
   }
 
-  /* ---------- Invite links (?join=CODE) ---------- */
-  function takeJoinCodeFromUrl() {
+  /* ---------- Links: invites (?join=CODE) and device pairing (?pair=123456) ---------- */
+  let pendingPair = null;
+
+  function takeLinkParamsFromUrl() {
     const params = new URLSearchParams(location.search);
-    const code = params.get("join");
-    if (!code) return;
-    params.delete("join");
+    const join = params.get("join") || params.get("code");
+    const pair = params.get("pair");
+    if (!join && !pair) return;
+    ["join", "code", "pair"].forEach((k) => params.delete(k));
     const rest = params.toString();
     history.replaceState(null, "", location.pathname + (rest ? "?" + rest : "") + location.hash);
-    if (BACKEND_URL) writeJSON(STORAGE_KEYS.pendingJoin, code);
+    if (join && BACKEND_URL) writeJSON(STORAGE_KEYS.pendingJoin, join);
+    if (pair && BACKEND_URL) pendingPair = pair.replace(/\D/g, "");
   }
 
   async function processPendingJoin() {
@@ -1637,6 +1664,35 @@
     if (!code || !sync || syncStatus !== "online") return;
     removeKey(STORAGE_KEYS.pendingJoin);
     await joinByCode(code);
+  }
+
+  /*
+   * Opened an invite link without an account: create one quietly (a name can be set
+   * later in Profile) so the join needs no typing at all. The join itself runs as
+   * soon as the socket is online (processPendingJoin).
+   */
+  const GUEST_NAME = "אורח/ת";
+  async function joinAsNewUser() {
+    showToast("מצטרפים לרשימה המשותפת…", 60000);
+    try {
+      await createAccount(GUEST_NAME, (text) => showToast(text, 60000));
+      showToast("כמעט שם — מצטרפים לרשימה…", 60000);
+    } catch (e) {
+      openWelcome("הוזמנת להצטרף לרשימת קניות משותפת! 🎉 לא הצלחנו להתחבר לשרת — נסו שוב:");
+    }
+  }
+
+  /* After auto-joining as a guest, invite them to set a real name. */
+  function suggestRename() {
+    if (!account || account.username !== GUEST_NAME) return;
+    setTimeout(() => showToast("הצטרפת לרשימה 🎉 איך לקרוא לך?", 8000, {
+      label: "הגדרת שם",
+      fn: () => {
+        switchTab("profile");
+        $.usernameInput.focus();
+        $.usernameInput.select();
+      },
+    }), 3200);
   }
 
   /* ---------- Real-time wiring ---------- */
@@ -1663,7 +1719,7 @@
       }
       if (status === "online") {
         processPendingJoin();
-        if (isOpen($.accountOverlay) && !inviteCode) loadInviteCode();
+        if (isOpen($.accountOverlay) && !inviteCode && !inviteLoading) loadInviteCode();
       }
     });
 
@@ -1826,11 +1882,11 @@
   /* ---------- Welcome / sign-up ---------- */
   const WELCOME_DEFAULT = "צרו חשבון כדי לסנכרן את הרשימה בין מכשירים ולשתף אותה בזמן אמת עם בני הבית. הפריטים שכבר ברשימה יישמרו.";
 
-  function openWelcome(message) {
+  function openWelcome(message, panel = "register") {
     $.welcomeText.textContent = message || WELCOME_DEFAULT;
     setWelcomeStatus("");
-    $.registerPanel.classList.remove("hidden");
-    $.linkPanel.classList.add("hidden");
+    $.registerPanel.classList.toggle("hidden", panel !== "register");
+    $.linkPanel.classList.toggle("hidden", panel !== "link");
     openSheet($.welcomeOverlay);
   }
   function closeWelcome() {
@@ -1846,19 +1902,80 @@
     [$.registerBtn, $.linkDeviceBtn, $.welcomeNameInput, $.linkCodeInput].forEach((x) => { x.disabled = busy; });
   }
 
-  /* Render's free tier can take ~50s to wake up, so allow a long timeout. */
-  async function backendFetch(path, options = {}) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 90000);
-    const slow = setTimeout(() => setWelcomeStatus("השרת מתעורר, זה יכול לקחת עד דקה…"), 3000);
+  /*
+   * HTTP call that survives a Render cold start: while the instance boots, requests
+   * fail with network errors or proxy 502/503/504, and then our own
+   * SERVER_UNAVAILABLE while the database connects. Those are retried for up to
+   * ~100s, with onWaking() showing a friendly status instead of an error.
+   */
+  const WAKING_TEXT = "השרת מתעורר, מיד מתחברים…";
+  async function backendFetch(path, options = {}, onWaking = (text) => setWelcomeStatus(text)) {
+    const deadline = Date.now() + 100000;
+    const slow = setTimeout(() => onWaking(WAKING_TEXT), 3000);
     try {
-      const res = await fetch(BACKEND_URL + path, { ...options, signal: controller.signal });
-      const body = await res.json().catch(() => ({}));
-      return { ok: res.ok, status: res.status, body };
+      for (let attempt = 0; ; attempt++) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 60000);
+        let res = null;
+        let body = {};
+        try {
+          res = await fetch(BACKEND_URL + path, { ...options, signal: controller.signal });
+          body = await res.json().catch(() => ({}));
+        } catch (e) {
+          res = null;
+        } finally {
+          clearTimeout(timer);
+        }
+        const asleep = !res || (!body.code && [502, 503, 504].includes(res.status)) || body.code === "SERVER_UNAVAILABLE";
+        if (!asleep) return { ok: res.ok, status: res.status, body };
+        if (Date.now() > deadline || navigator.onLine === false) {
+          const err = new Error("server unreachable");
+          err.name = "AbortError";
+          throw err;
+        }
+        onWaking(WAKING_TEXT);
+        await sleep(Math.min(2000 * (attempt + 1), 6000));
+      }
     } finally {
-      clearTimeout(timer);
       clearTimeout(slow);
     }
+  }
+
+  /* Creates the account, moves this device's items into it and connects. Throws on failure. */
+  async function createAccount(username, onWaking) {
+    const res = await backendFetch("/api/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username }),
+    }, onWaking);
+    if (!res.ok) throw new Error(res.body.error || "register failed");
+    const { user, token, listId } = res.body;
+
+    const localItems = items.slice();
+    account = { userId: user.userId, username: user.username, token };
+    writeJSON(STORAGE_KEYS.account, account);
+    lists = [{ listId, ownerId: user.userId, ownerName: user.username, name: null, memberCount: 1, remaining: 0 }];
+    saveLists();
+    setActiveList(listId);
+    listInfo = { listId, ownerId: user.userId, name: null, members: [{ userId: user.userId, username: user.username }] };
+    items = localItems.map((i) => ({ ...i, addedBy: user.userId }));
+    saveItems();
+
+    // Upload what was already on the device, then connect.
+    sync = startSync();
+    items.forEach((item) => {
+      const add = { type: "add", item };
+      sync.send(...toWire(add, listId), add);
+      if (item.bought) {
+        const toggle = { type: "toggle", id: item.id, bought: true };
+        sync.send(...toWire(toggle, listId), toggle);
+      }
+    });
+    sync.start();
+    writeJSON(STORAGE_KEYS.welcomeSeen, true);
+    render();
+    renderAccountUI();
+    return user;
   }
 
   async function registerAccount() {
@@ -1870,39 +1987,8 @@
     setWelcomeBusy(true);
     setWelcomeStatus("יוצר חשבון…");
     try {
-      const res = await backendFetch("/api/register", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username }),
-      });
-      if (!res.ok) throw new Error(res.body.error || "register failed");
-      const { user, token, listId } = res.body;
-
-      const localItems = items.slice();
-      account = { userId: user.userId, username: user.username, token };
-      writeJSON(STORAGE_KEYS.account, account);
-      lists = [{ listId, ownerId: user.userId, ownerName: user.username, name: null, memberCount: 1, remaining: 0 }];
-      saveLists();
-      setActiveList(listId);
-      listInfo = { listId, ownerId: user.userId, name: null, members: [{ userId: user.userId, username: user.username }] };
-      items = localItems.map((i) => ({ ...i, addedBy: user.userId }));
-      saveItems();
-
-      // Upload what was already on the device, then connect.
-      sync = startSync();
-      items.forEach((item) => {
-        const add = { type: "add", item };
-        sync.send(...toWire(add, listId), add);
-        if (item.bought) {
-          const toggle = { type: "toggle", id: item.id, bought: true };
-          sync.send(...toWire(toggle, listId), toggle);
-        }
-      });
-      sync.start();
-
+      const user = await createAccount(username);
       closeWelcome();
-      render();
-      renderAccountUI();
       showToast(`ברוכים הבאים, ${user.username}! 🎉`);
     } catch (e) {
       setWelcomeStatus(e.name === "AbortError" ? "השרת לא הגיב. נסו שוב בעוד רגע." : "יצירת החשבון נכשלה. בדקו את החיבור ונסו שוב.", true);
@@ -1911,26 +1997,32 @@
     }
   }
 
-  async function linkDevice() {
-    const token = $.linkCodeInput.value.trim();
-    if (!token) {
-      setWelcomeStatus("הזינו קוד חיבור", true);
+  /* New device: redeem the 6-digit code shown on a signed-in device (typed, or from its QR link). */
+  async function linkDevice(codeArg) {
+    const code = String(codeArg || $.linkCodeInput.value).replace(/\D/g, "");
+    if (code.length !== 6) {
+      setWelcomeStatus("הזינו את 6 הספרות שמופיעות במכשיר השני", true);
       return;
     }
     setWelcomeBusy(true);
     setWelcomeStatus("מתחבר…");
     try {
-      const res = await backendFetch("/api/me", { headers: { Authorization: "Bearer " + token } });
-      if (res.status === 401) {
-        setWelcomeStatus("קוד החיבור לא תקין", true);
+      const res = await backendFetch("/api/pair/redeem", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      if (res.status === 404) {
+        setWelcomeStatus("הקוד לא תקין או שפג תוקפו. צרו קוד חדש במכשיר השני.", true);
+        $.linkCodeInput.select();
         return;
       }
-      if (res.status === 503) {
-        setWelcomeStatus("השרת עדיין עולה. נסו שוב בעוד כמה שניות.", true);
+      if (res.status === 429) {
+        setWelcomeStatus("יותר מדי ניסיונות. נסו שוב בעוד כמה דקות.", true);
         return;
       }
       if (!res.ok) throw new Error("link failed");
-      const { user, lists: serverLists } = res.body;
+      const { token, user, lists: serverLists } = res.body;
 
       // Keep this device's local-only list untouched under its own key.
       account = { userId: user.userId, username: user.username, token };
@@ -1945,15 +2037,99 @@
       sync = startSync();
       sync.start();
 
+      $.linkCodeInput.value = "";
       closeWelcome();
       render();
       renderAccountUI();
-      showToast(`מחובר כ-${user.username} ✓`);
+      showToast(`המכשיר מחובר — שלום ${user.username} ✓`);
     } catch (e) {
       setWelcomeStatus(e.name === "AbortError" ? "השרת לא הגיב. נסו שוב בעוד רגע." : "החיבור נכשל. בדקו את החיבור לאינטרנט ונסו שוב.", true);
     } finally {
       setWelcomeBusy(false);
     }
+  }
+
+  /* ---------- Pair another device (this device shows the code + QR) ---------- */
+  let pairTicker = null;
+  let pairExpiresAt = 0;
+
+  /* QR as an SVG path; always black on white so every camera can read it, in both themes. */
+  function renderQr(container, text) {
+    if (typeof window.qrcode !== "function") {
+      container.innerHTML = "";
+      return;
+    }
+    const qr = window.qrcode(0, "M");
+    qr.addData(text);
+    qr.make();
+    const n = qr.getModuleCount();
+    const margin = 2;
+    let d = "";
+    for (let r = 0; r < n; r++) {
+      for (let c = 0; c < n; c++) if (qr.isDark(r, c)) d += `M${c + margin} ${r + margin}h1v1h-1z`;
+    }
+    const size = n + margin * 2;
+    container.innerHTML = `<svg viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges" role="img" aria-label="קוד QR לחיבור המכשיר"><rect width="${size}" height="${size}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
+  }
+
+  function stopPairTicker() {
+    clearInterval(pairTicker);
+    pairTicker = null;
+  }
+
+  function tickPairCode() {
+    const left = Math.max(0, pairExpiresAt - Date.now());
+    if (!left) {
+      stopPairTicker();
+      $.pairTimer.textContent = "הקוד פג תוקף";
+      $.pairQr.classList.add("expired");
+      $.pairCode.classList.add("expired");
+      $.pairRefreshBtn.classList.remove("hidden");
+      return;
+    }
+    const sec = Math.ceil(left / 1000);
+    $.pairTimer.textContent = `בתוקף עוד ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+  }
+
+  async function refreshPairCode() {
+    stopPairTicker();
+    $.pairRefreshBtn.classList.add("hidden");
+    $.pairQr.classList.remove("expired");
+    $.pairCode.classList.remove("expired");
+    $.pairQr.classList.add("loading");
+    $.pairQr.innerHTML = "";
+    $.pairCode.textContent = "••• •••";
+    $.pairTimer.textContent = "יוצר קוד…";
+    let res = null;
+    try {
+      res = await backendFetch("/api/pair/start", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + account.token },
+      }, (text) => { $.pairTimer.textContent = text; });
+    } catch (e) {
+      res = null;
+    }
+    $.pairQr.classList.remove("loading");
+    if (!isOpen($.pairOverlay)) return;
+    if (!res || !res.ok) {
+      $.pairTimer.textContent = res && res.status === 401
+        ? "החשבון לא אומת מול השרת."
+        : "לא הצלחנו ליצור קוד. בדקו את החיבור ונסו שוב.";
+      $.pairRefreshBtn.classList.remove("hidden");
+      return;
+    }
+    const { code, ttlMs } = res.body;
+    pairExpiresAt = Date.now() + (ttlMs || 5 * 60 * 1000); // relative, so a wrong device clock doesn't matter
+    $.pairCode.textContent = `${code.slice(0, 3)} ${code.slice(3)}`;
+    renderQr($.pairQr, `${appBaseUrl()}?pair=${code}`);
+    tickPairCode();
+    pairTicker = setInterval(tickPairCode, 1000);
+  }
+
+  function openPairSheet() {
+    if (!account) return;
+    openSheet($.pairOverlay);
+    refreshPairCode();
   }
 
   /* ---------- Event wiring ---------- */
@@ -2043,28 +2219,33 @@
 
   // Share & account
   $.enableSyncBtn.addEventListener("click", () => openWelcome());
-  $.copyFullIdBtn.addEventListener("click", () => copyText(account.userId, "מזהה המשתמש הועתק"));
   $.membersBtn.addEventListener("click", openAccountModal);
   wireSheet($.accountOverlay, $.closeAccountBtn);
   $.saveListNameBtn.addEventListener("click", saveListName);
   $.listNameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") saveListName(); });
   $.shareLinkBtn.addEventListener("click", shareInviteLink);
-  $.copyCodeBtn.addEventListener("click", () => inviteCode && copyText(formatCode(inviteCode), "קוד ההזמנה הועתק"));
+  $.shareWhatsappBtn.addEventListener("click", shareViaWhatsapp);
+  $.shareSmsBtn.addEventListener("click", shareViaSms);
+  $.copyLinkBtn.addEventListener("click", copyInviteLink);
   $.regenCodeBtn.addEventListener("click", () => {
-    showConfirm("ליצור קוד הזמנה חדש? הקוד והקישור הקודמים יפסיקו לעבוד (מי שכבר הצטרף יישאר).", () => loadInviteCode(true));
+    showConfirm("ליצור קישור הזמנה חדש? הקישור הקודם יפסיק לעבוד (מי שכבר הצטרף יישאר).", () => loadInviteCode(true));
   });
-  $.shareBtn.addEventListener("click", shareList);
-  $.shareUserIdInput.addEventListener("keydown", (e) => { if (e.key === "Enter") shareList(); });
   $.leaveListBtn.addEventListener("click", leaveList);
   $.deleteListBtn.addEventListener("click", deleteList);
   $.saveUsernameBtn.addEventListener("click", saveUsername);
   $.usernameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") saveUsername(); });
-  $.showLinkCodeBtn.addEventListener("click", () => {
-    $.linkCode.textContent = account.token;
-    $.linkCodeRow.classList.remove("hidden");
-    $.showLinkCodeBtn.classList.add("hidden");
+  $.usernameInput.addEventListener("input", updateSaveNameBtn);
+
+  // Device pairing
+  $.pairDeviceBtn.addEventListener("click", openPairSheet);
+  wireSheet($.pairOverlay, $.closePairBtn, stopPairTicker);
+  $.pairRefreshBtn.addEventListener("click", refreshPairCode);
+  $.profilePairBtn.addEventListener("click", () => openWelcome("חברו את המכשיר הזה לחשבון שכבר קיים אצלכם במכשיר אחר.", "link"));
+  $.linkCodeInput.addEventListener("input", () => {
+    const digits = $.linkCodeInput.value.replace(/\D/g, "").slice(0, 6);
+    if ($.linkCodeInput.value !== digits) $.linkCodeInput.value = digits;
+    if (digits.length === 6) linkDevice(digits);
   });
-  $.copyLinkCodeBtn.addEventListener("click", () => copyText(account.token, "קוד החיבור הועתק — אל תשתפו אותו"));
   $.logoutBtn.addEventListener("click", logout);
 
   // Profile tab
@@ -2097,12 +2278,13 @@
   $.skipWelcomeBtn.addEventListener("click", closeWelcome);
   $.registerBtn.addEventListener("click", registerAccount);
   $.welcomeNameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") registerAccount(); });
-  $.linkDeviceBtn.addEventListener("click", linkDevice);
   $.linkCodeInput.addEventListener("keydown", (e) => { if (e.key === "Enter") linkDevice(); });
+  $.linkDeviceBtn.addEventListener("click", () => linkDevice());
   $.showLinkPanelBtn.addEventListener("click", () => {
     setWelcomeStatus("");
     $.registerPanel.classList.add("hidden");
     $.linkPanel.classList.remove("hidden");
+    $.linkCodeInput.focus();
   });
   $.showRegisterPanelBtn.addEventListener("click", () => {
     setWelcomeStatus("");
@@ -2111,7 +2293,7 @@
   });
 
   /* ---------- Init ---------- */
-  takeJoinCodeFromUrl();
+  takeLinkParamsFromUrl();
   loadState();
   applyTheme(document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark");
   QuickAdd.seed(items, historyKey());
@@ -2134,11 +2316,19 @@
   renderAccountUI();
   setupVoice();
 
+  const hasInvite = BACKEND_URL && !!readJSON(STORAGE_KEYS.pendingJoin, null);
   if (account) {
     sync = startSync();
     sync.start();
-  } else if (BACKEND_URL && readJSON(STORAGE_KEYS.pendingJoin, null)) {
-    openWelcome("הוזמנת להצטרף לרשימת קניות משותפת! 🎉 צרו חשבון (או התחברו) כדי להצטרף.");
+    if (pendingPair) showToast("המכשיר הזה כבר מחובר לחשבון ✓", 3500);
+    else if (hasInvite) showToast("מצטרפים לרשימה המשותפת…", 8000);
+  } else if (pendingPair) {
+    // Scanned the QR of a signed-in device: connect without typing.
+    openWelcome("מחברים את המכשיר לחשבון שלכם…", "link");
+    $.linkCodeInput.value = pendingPair;
+    linkDevice(pendingPair);
+  } else if (hasInvite) {
+    joinAsNewUser();
   } else if (BACKEND_URL && !readJSON(STORAGE_KEYS.welcomeSeen, false)) {
     openWelcome();
   }

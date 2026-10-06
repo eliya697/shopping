@@ -9,6 +9,7 @@ const store = require("./db");
 const attachSockets = require("./sockets");
 const adminRouter = require("./admin");
 const aiRouter = require("./ai");
+const pairingRouter = require("./pairing");
 
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -28,7 +29,7 @@ function logEnvDiagnostics() {
       ? `set (${env.TURSO_DATABASE_URL.replace(/^(\w+:\/\/[^/?]+).*$/, "$1")})`
       : "MISSING — using a local SQLite file" + (env.RENDER ? " (DATA WILL BE LOST on Render)" : "")}`,
     `TURSO_AUTH_TOKEN: ${secret("TURSO_AUTH_TOKEN")}`,
-    `GEMINI_API_KEY: ${env.GEMINI_API_KEY ? `set (${env.GEMINI_API_KEY.length} chars)` : "MISSING — AI assistant disabled"}${env.GEMINI_MODEL ? `, model ${env.GEMINI_MODEL}` : ""}`,
+    `GEMINI_API_KEY: ${env.GEMINI_API_KEY ? `set (${env.GEMINI_API_KEY.length} chars${/^\s|\s$|^["']/.test(env.GEMINI_API_KEY) ? ", has spaces/quotes around it — they are stripped" : ""})` : "MISSING — AI assistant disabled"}${env.GEMINI_MODEL ? `, model ${env.GEMINI_MODEL}` : ""}`,
     ...adminRouter.describeAdminConfig().lines,
   ];
   // Near-misses like "ADMIN_SECRET_KEY " or "admin_secret_key" are the usual reason a key "isn't set".
@@ -113,6 +114,7 @@ app.get("/api/me", requireDb, async (req, res) => {
   res.json({ user, lists: await store.getListsForUser(user.userId) });
 });
 
+app.use("/api/pair", pairingRouter());
 app.use("/api/admin", adminRouter(sockets));
 
 app.use((err, _req, res, _next) => {
@@ -131,6 +133,7 @@ server.listen(PORT, () => {
   console.log(`Allowed origins: ${allowedOrigins.join(", ") || "(localhost only)"}`);
 });
 store.init(); // connects + migrates in the background, retrying until the database answers
+aiRouter.checkGemini(); // logs whether the Gemini key works and which model will be used
 
 function shutdown() {
   io.close();

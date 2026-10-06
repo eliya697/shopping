@@ -13,6 +13,7 @@
     "@capacitor/android": "^8.5.2",
     "@capacitor/app": "^8.1.2",
     "@capacitor/core": "^8.5.2",
+    "@capacitor/share": "^8.0.3",
     "@capacitor/splash-screen": "^8.0.2"
   },
   "devDependencies": {
