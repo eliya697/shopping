@@ -75,8 +75,20 @@ app.use("/api/ai", aiRouter()); // before the global parser: chat history needs 
 app.use(express.json({ limit: "10kb" }));
 
 app.get("/", (_req, res) => res.type("text").send("Shopping list server is running."));
-// Always 200 so Render's health check passes during a cold start; `db` tells the real state.
-app.get("/health", (_req, res) => res.json({ ok: true, time: Date.now(), db: store.isReady() ? "ready" : "connecting" }));
+/*
+ * Health / keep-alive pings (Render's health check, cron-job.org, the app's wake-up ping).
+ * Always 200, even during a cold start, and never touches the database; `db` tells its state.
+ * GET and HEAD both work (Express answers HEAD for GET routes).
+ */
+app.get(["/api/ping", "/health"], (_req, res) => {
+  res.set("Cache-Control", "no-store").status(200).json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    ok: true, // older app versions read these two
+    time: Date.now(),
+    db: store.isReady() ? "ready" : "connecting",
+  });
+});
 
 /* Until the database answers, say "try again" — never "not found". */
 function requireDb(_req, res, next) {

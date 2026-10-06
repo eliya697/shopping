@@ -435,6 +435,11 @@
     return checkedHeader.wrap;
   }
 
+  /* Invisible room after the last row; always the list's final node. */
+  const listSpacer = document.createElement("div");
+  listSpacer.className = "scroll-spacer";
+  listSpacer.setAttribute("aria-hidden", "true");
+
   function getVisibleItems() {
     let visible = items;
     if (activeFilter !== "all") visible = visible.filter((i) => i.category === activeFilter);
@@ -474,6 +479,7 @@
       nodes.push(checkedHeaderNode(bought.length, open));
       if (open) bought.forEach((i) => nodes.push(upsertRow(i).row));
     }
+    if (nodes.length) nodes.push(listSpacer);
     return nodes;
   }
 
@@ -502,6 +508,8 @@
         headerEls.delete(key);
       }
     });
+
+    if (!desired.includes(listSpacer)) listSpacer.remove();
 
     // Put nodes in order, moving only the ones that are out of place.
     let cursor = $.listContainer.firstChild;
@@ -723,6 +731,29 @@
   }
 
   /* Typed input: "2 חלב", "חלב x2", and comma-separated lists all work. */
+  /*
+   * After the user adds something, bring it into view above the input bar. If it's
+   * the lowest row (checked drawer closed or empty), scroll all the way to the
+   * spacer; otherwise (open drawer below it) just far enough to show the row.
+   */
+  function revealAdded(item) {
+    if (!item) return;
+    const ref = rowRefs.get(item.id);
+    if (!ref || !ref.row.isConnected) return;
+    const rows = $.listContainer.querySelectorAll(".item-row");
+    const lowest = rows[rows.length - 1] === ref.row;
+    requestAnimationFrame(() => {
+      if (lowest) listSpacer.scrollIntoView({ behavior: "smooth", block: "end" });
+      else ref.row.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+    // Smooth scrolling can be cut short; make sure the row really ends up visible.
+    setTimeout(() => {
+      const r = ref.row.getBoundingClientRect();
+      const bar = document.querySelector("#listsTab .add-bar").getBoundingClientRect();
+      if (r.bottom > bar.top || r.top < 0) ref.row.scrollIntoView({ block: "nearest" });
+    }, 450);
+  }
+
   function addFromInput() {
     const raw = $.newItemInput.value.trim();
     if (!raw) return;
@@ -736,6 +767,7 @@
     });
     $.newItemInput.value = "";
     renderQuickStrip();
+    revealAdded(added[added.length - 1]);
     if (duplicate && !added.length) {
       showToast(`"${duplicate.name}" כבר ברשימה`);
       pulseRow(duplicate.id);
@@ -949,7 +981,10 @@
       chip.addEventListener("click", () => {
         const typed = ItemParser.parseSingle($.newItemInput.value);
         const item = addFromHistory({ ...entry, quantity: typed.quantity || entry.quantity });
-        if (item) $.newItemInput.value = "";
+        if (item) {
+          $.newItemInput.value = "";
+          revealAdded(item);
+        }
         renderQuickStrip();
       });
       $.quickStrip.appendChild(chip);
@@ -1028,6 +1063,7 @@
       showToast(skipped.length ? `כבר ברשימה: ${skipped.join(", ")}` : `לא זיהיתי פריטים ב"${text}"`, 3500);
       return;
     }
+    revealAdded(added[added.length - 1]);
     const names = added.map((i) => i.name).join(", ");
     const already = skipped.length ? ` (כבר ברשימה: ${skipped.join(", ")})` : "";
     showToast(`נוספו: ${names}${already}`, 6000, {

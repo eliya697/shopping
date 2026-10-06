@@ -29,11 +29,19 @@ const GEMINI_API = process.env.GEMINI_API_BASE || "https://generativelanguage.go
 // Tried after GEMINI_MODEL, then every Flash model the key's model list reports (newest first).
 // "gemini-flash-latest" is Google's alias for the current Flash model. (gemini-1.5-* was retired in 2025.)
 const MODEL_CANDIDATES = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash"];
-const MAX_MODELS_PER_QUESTION = 5;
+// Lighter models have separate (and larger) free-tier quotas: the fallback when a model answers 429.
+const LITE_CANDIDATES = ["gemini-flash-lite-latest", "gemini-2.5-flash-lite"];
+// Tried first, but only if the key's model list still reports them (Google retired gemini-1.5-* in 2025).
+const LEGACY_IF_LISTED = ["gemini-1.5-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro"];
+const MAX_MAIN_MODELS = 3;
+const MAX_LITE_MODELS = 2;
+const FALLBACK_DELAY_MS = 2000; // between models after a quota/transient failure, so retries don't hammer the quota
+const MAX_QUOTA_FALLBACKS = 2; // per question
+const QUOTA_COOLDOWN_MS = 60000; // when Gemini doesn't say how long to wait
 // Short answers are fast answers: the prompt asks for at most 8 products and the server enforces it.
 const MAX_ITEMS_PER_ANSWER = 8;
 const REQUEST_TIMEOUT_MS = 25000;
-const MAX_ATTEMPTS_PER_MODEL = 3;
+const MAX_ATTEMPTS_PER_MODEL = 2; // one retry for transient errors (overloaded, timeout), then the next model
 const TOTAL_BUDGET_MS = 45000; // all models and retries together; the app waits 60s
 
 const LIMIT_PER_HOUR = 40;
@@ -126,6 +134,10 @@ function refund(userId) {
   if (recent && recent.length) recent.pop();
 }
 setInterval(() => hits.clear(), 3600 * 1000).unref();
+setInterval(() => {
+  const now = Date.now();
+  for (const [m, until] of health.cooldown) if (until <= now) health.cooldown.delete(m);
+}, 30000).unref();
 
 /* ---------- Errors ----------
  * reason: invalid_key | forbidden | model_not_found | quota | overloaded | timeout | schema | bad_response | blocked | network
@@ -164,6 +176,7 @@ const health = {
   reason: null, // last failure reason, for /api/ai/status
   available: null, // Set of model ids the key can call generateContent on, if known
   dead: new Set(), // models that answered "not found" — skipped from then on
+  cooldown: new Map(), // model -> time its quota (429) should have recovered
   lastError: null, // { reason, detail, model, at } of the last failed question
   checkedAt: null,
 };
@@ -175,7 +188,7 @@ const health = {
 function rankFlashModels(ids) {
   const version = (id) => parseFloat((/gemini-(\d+(?:\.\d+)?)/.exec(id) || [])[1] || "0");
   return ids
-    .filter((id) => /^gemini-.*flash/.test(id) && !/image|tts|live|audio|embedding|vision|thinking-exp|learnlm/.test(id))
+    .filter((id) => /^gemini-.*flash/.test(id) && !/image|tts|live|audio|embedding|vision|thinking-exp|learnlm|omni/.test(id))
     .sort((a, b) =>
       version(b) - version(a)
       || /preview|exp/.test(a) - /preview|exp/.test(b)
@@ -183,16 +196,30 @@ function rankFlashModels(ids) {
       || a.length - b.length);
 }
 
-function modelOrder() {
+const isLite = (id) => /lite/.test(id);
+
+function modelOrder(now = Date.now()) {
   const configured = process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL.trim()] : [];
+  const listed = (m) => !health.available || !health.available.size || health.available.has(m) || /latest$/.test(m) || configured.includes(m);
+  const usable = (m) => listed(m) && !health.dead.has(m) && !((health.cooldown.get(m) || 0) > now);
   const discovered = health.available ? rankFlashModels([...health.available]) : [];
-  let order = [...new Set([...configured, health.model, ...MODEL_CANDIDATES, ...discovered].filter(Boolean))];
-  if (health.available && health.available.size) {
-    // Skip guesses the key's model list doesn't have (aliases like *-latest aren't always listed).
-    order = order.filter((m) => health.available.has(m) || /latest$/.test(m) || configured.includes(m));
-  }
-  order = order.filter((m) => !health.dead.has(m)); // answered 404 earlier in this process
-  return order.slice(0, MAX_MODELS_PER_QUESTION);
+  const legacy = health.available ? LEGACY_IF_LISTED.filter((m) => health.available.has(m)) : [];
+
+  const main = [...new Set([...configured, health.model, ...legacy, ...MODEL_CANDIDATES, ...discovered.filter((m) => !isLite(m))])]
+    .filter((m) => m && usable(m))
+    .slice(0, MAX_MAIN_MODELS + configured.length);
+  const lite = [...new Set([...LITE_CANDIDATES, ...discovered.filter(isLite)])]
+    .filter((m) => usable(m) && !main.includes(m))
+    .slice(0, MAX_LITE_MODELS);
+  return [...main, ...lite];
+}
+
+/* "37s" / "1.5s" (google.rpc.RetryInfo) -> ms */
+function retryDelayMs(body) {
+  const details = (body && body.error && body.error.details) || [];
+  const info = details.find((d) => /RetryInfo/.test(d["@type"] || ""));
+  const secs = info && parseFloat(String(info.retryDelay || "").replace(/s$/, ""));
+  return secs > 0 ? Math.ceil(secs * 1000) : null;
 }
 
 /*
@@ -343,6 +370,7 @@ async function callModel({ apiKey, model, contents, useSchema, useThinkingConfig
     const err = new GeminiError(classify(res.status, message), `${model} ${res.status}: ${redact(message)}`, res.status);
     err.detail = redact(message);
     err.model = model;
+    if (err.reason === "quota") err.retryAfterMs = retryDelayMs(body) || QUOTA_COOLDOWN_MS;
     throw err;
   }
   const candidate = body.candidates && body.candidates[0];
@@ -359,9 +387,24 @@ async function callModel({ apiKey, model, contents, useSchema, useThinkingConfig
 async function askGemini({ apiKey, history, message, listItems }) {
   const contents = buildContents(history, message, listItems);
   const deadline = Date.now() + TOTAL_BUDGET_MS;
-  let lastError = new GeminiError("model_not_found", "no model to try");
+  const models = modelOrder();
 
-  for (const model of modelOrder()) {
+  // Every model is still cooling down after a 429: answer now instead of spending more quota.
+  if (!models.length && health.cooldown.size) {
+    const until = Math.min(...health.cooldown.values());
+    const err = new GeminiError("quota", "all models are cooling down after quota errors");
+    err.retryAfterMs = Math.max(1000, until - Date.now());
+    throw err;
+  }
+
+  let lastError = new GeminiError("model_not_found", "no model to try");
+  let quotaHits = 0;
+  let quotaError = null; // reported over later 404s: "quota" is the useful answer
+  let pauseBeforeNext = false;
+
+  for (const model of models) {
+    if (pauseBeforeNext) await sleep(FALLBACK_DELAY_MS);
+    pauseBeforeNext = false;
     let useSchema = true;
     let useThinkingConfig = true;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_MODEL; attempt++) {
@@ -369,12 +412,13 @@ async function askGemini({ apiKey, history, message, listItems }) {
       if (remaining < 3000) throw lastError.reason === "model_not_found" ? new GeminiError("timeout", "out of time") : lastError;
       try {
         const answer = await callModel({ apiKey, model, contents, useSchema, useThinkingConfig, timeoutMs: Math.min(REQUEST_TIMEOUT_MS, remaining) });
-        if (health.model !== model) console.log(`[ai] now using model ${model}`);
-        Object.assign(health, { ok: true, model, reason: null });
+        if (health.model !== model && !isLite(model)) console.log(`[ai] now using model ${model}`);
+        // Lite models are a stopgap during a quota hit; keep preferring the main model.
+        Object.assign(health, { ok: true, reason: null }, isLite(model) ? {} : { model });
         return answer;
       } catch (err) {
         lastError = err;
-        console.warn(`[ai] attempt ${attempt} failed (${err.reason}): ${err.message}`);
+        console.warn(`[ai] ${model} attempt ${attempt} failed (${err.reason}): ${err.message}`);
         if (err.reason === "schema" && useSchema) {
           useSchema = false; // the prompt also describes the JSON shape
           continue;
@@ -384,20 +428,31 @@ async function askGemini({ apiKey, history, message, listItems }) {
           continue;
         }
         if (err.reason === "model_not_found") {
-          health.dead.add(model);
+          health.dead.add(model); // a 404 costs no quota: move on right away
           if (health.model === model) health.model = null;
-          break; // next model
+          break;
+        }
+        if (err.reason === "quota") {
+          // Quotas are per model: rest this one, and try another (a lite model) after a pause.
+          health.cooldown.set(model, Date.now() + (err.retryAfterMs || QUOTA_COOLDOWN_MS));
+          quotaError = err;
+          if (++quotaHits > MAX_QUOTA_FALLBACKS) throw err;
+          pauseBeforeNext = true;
+          break;
         }
         if (TRANSIENT.has(err.reason) && attempt < MAX_ATTEMPTS_PER_MODEL) {
-          await sleep(700 * attempt);
+          await sleep(1000);
           continue;
         }
-        if (TRANSIENT.has(err.reason)) break; // this model keeps failing: try the next one
-        throw err; // invalid_key, forbidden, quota, blocked, bad_request: another model won't help
+        if (TRANSIENT.has(err.reason)) {
+          pauseBeforeNext = true; // this model keeps failing: next one, after a pause
+          break;
+        }
+        throw err; // invalid_key, forbidden, blocked, bad_request: another model won't help
       }
     }
   }
-  throw lastError;
+  throw quotaError || lastError;
 }
 
 /* ---------- Router ---------- */
@@ -418,6 +473,7 @@ function aiRouter() {
       tryOrder: geminiKey() ? modelOrder() : [],
       availableFlash: health.available ? rankFlashModels([...health.available]) : null,
       notFound: [...health.dead],
+      coolingDown: Object.fromEntries([...health.cooldown].map(([m, until]) => [m, Math.max(0, Math.ceil((until - Date.now()) / 1000))])),
       reason: health.reason,
       lastError: health.lastError,
       checkedAt: health.checkedAt,
@@ -481,10 +537,22 @@ function aiRouter() {
       if (reason === "blocked") {
         return res.json({ reply: "אני לא יכול לעזור עם זה. אפשר לשאול אותי על ארוחות, מתכונים וקניות 🙂", sections: [] });
       }
-      // Structured, so the app can say exactly what's wrong (bad key, quota, missing model…).
-      const body = { error: "assistant unavailable", code: reason === "quota" ? "AI_QUOTA" : "AI_FAILED", reason, detail, model: err.model || null };
+      if (reason === "quota") {
+        const retryAfter = Math.ceil((err.retryAfterMs || QUOTA_COOLDOWN_MS) / 1000);
+        return res.set("Retry-After", String(retryAfter)).status(429).json({
+          error: "Gemini quota exceeded",
+          code: "AI_QUOTA",
+          reason,
+          message: "מכסת ה-AI הזמנית התמלאה. נסו שוב בעוד דקה.",
+          retryAfter,
+          detail,
+          model: err.model || null,
+        });
+      }
+      // Structured, so the app can say exactly what's wrong (bad key, missing model…).
+      const body = { error: "assistant unavailable", code: "AI_FAILED", reason, detail, model: err.model || null };
       if (reason === "model_not_found" && health.available) body.tried = [...health.dead];
-      res.status(reason === "quota" ? 429 : 502).json(body);
+      res.status(502).json(body);
     }
   });
 

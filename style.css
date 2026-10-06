@@ -64,9 +64,15 @@ html, body {
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Arial Hebrew", Arial, sans-serif;
-  height: 100%;
   overscroll-behavior-y: contain;
 }
+html { height: 100%; }
+/*
+ * min-height, not height: with a fixed 100% body the padding-bottom below (room for
+ * the bottom nav) sat inside the screen-tall box instead of after the content, so
+ * the last ~64px of every page ended up under the nav and the input bar.
+ */
+body { min-height: 100%; }
 body { padding-bottom: var(--nav-h); }
 
 #app {
@@ -1570,4 +1576,26 @@ strong.plain { color: var(--text); font-weight: 700; }
 @keyframes loadingIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) {
   .ai-dots .dot { animation: none; opacity: 0.8; }
+}
+
+/* =====================================================================
+ * Bottom clearance: whatever floats at the bottom (input bar, bottom nav,
+ * keyboard accessory, toasts), the last row of every scrollable view can be
+ * scrolled fully above it and tapped.
+ * ===================================================================== */
+#listContainer,
+#aiMessages,
+.tab-body {
+  padding-bottom: 140px !important;
+}
+.scroll-spacer {
+  height: 80px;
+  width: 100%;
+  flex: 0 0 auto;
+  pointer-events: none;
+}
+/* When a just-added row is revealed, keep it clear of the sticky header and the bars. */
+.item-row {
+  scroll-margin-top: 200px;
+  scroll-margin-bottom: calc(var(--nav-h) + 120px);
 }

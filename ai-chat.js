@@ -34,7 +34,7 @@
     AI_DISABLED: "מפתח GEMINI_API_KEY חסר בשרת (Render), ולכן העוזר החכם כבוי.",
     INVALID_TOKEN: "החשבון לא אומת מול השרת. נסו להתחבר מחדש.",
     RATE_LIMITED: "הגעתם למגבלת השאלות לשעה. נסו שוב מאוחר יותר.",
-    AI_QUOTA: "העוזר הגיע למכסת השימוש של Gemini. נסו שוב בעוד כמה דקות.",
+    AI_QUOTA: "מכסת ה-AI הזמנית התמלאה. נסו שוב בעוד דקה.",
     invalid_key: "מפתח ה-Gemini שמוגדר בשרת לא תקין או חסום, ולכן העוזר לא זמין. (מנהל האפליקציה: בדקו את GEMINI_API_KEY ב-Render.)",
     forbidden: "מפתח ה-Gemini בשרת לא מורשה להשתמש במודל. (מנהל האפליקציה: בדקו את הגבלות המפתח ב-Google AI Studio.)",
     model_not_found: "אף מודל Gemini לא זמין כרגע למפתח שמוגדר בשרת.",
@@ -46,7 +46,7 @@
     asleep: "השרת לא התעורר בזמן. נסו שוב בעוד רגע.",
     default: "העוזר לא זמין כרגע. נסו שוב.",
   };
-  const NOT_RETRYABLE = new Set(["AI_DISABLED", "RATE_LIMITED", "AI_QUOTA", "invalid_key", "forbidden"]);
+  const NOT_RETRYABLE = new Set(["AI_DISABLED", "RATE_LIMITED", "invalid_key", "forbidden"]);
 
   const el = (id) => document.getElementById(id);
   const make = (tag, className, text) => {
@@ -63,6 +63,12 @@
   let busy = false;
   let voice = null;
   let conversation = 0; // bumped by "new chat"; answers to an older conversation are dropped
+  // After a send, sending is locked for a moment so a double tap can't fire two
+  // Gemini requests (each one counts against the API quota).
+  const SEND_COOLDOWN_MS = 3000;
+  let sendLockedUntil = 0;
+  let unlockTimer = null;
+  const sendLocked = () => Date.now() < sendLockedUntil;
 
   function forgetStoredChat() {
     try { localStorage.removeItem(LEGACY_STORAGE_KEY); } catch (e) {}
@@ -202,7 +208,12 @@
       typing.appendChild(bubble);
       $.messages.appendChild(typing);
     }
-    $.send.disabled = busy;
+    // Invisible room under the last message, so it always scrolls fully clear of the input bar.
+    const spacer = make("div", "scroll-spacer");
+    spacer.setAttribute("aria-hidden", "true");
+    $.messages.appendChild(spacer);
+
+    $.send.disabled = busy || sendLocked();
     refreshAddButtons();
   }
 
@@ -331,7 +342,10 @@
 
   async function send(rawText) {
     const text = String(rawText || "").trim();
-    if (!text || busy) return;
+    if (!text || busy || sendLocked()) return;
+    sendLockedUntil = Date.now() + SEND_COOLDOWN_MS;
+    clearTimeout(unlockTimer);
+    unlockTimer = setTimeout(() => { $.send.disabled = busy; }, SEND_COOLDOWN_MS);
     if (!opts.getToken()) {
       opts.onNeedAccount();
       return;
@@ -369,6 +383,7 @@
 
   function newChat() {
     conversation++;
+    sendLockedUntil = 0;
     messages = [];
     busy = false;
     forgetStoredChat();
