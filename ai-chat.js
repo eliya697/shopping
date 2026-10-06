@@ -19,7 +19,7 @@
 
   const STATUS = {
     waking: "השרת מתעורר, מיד מתחברים…",
-    thinking: "חושב על תשובה…",
+    thinking: "ה-AI חושב…",
   };
 
   const PROMPTS = [
@@ -189,11 +189,16 @@
     if (!messages.length && !busy) $.messages.appendChild(renderEmpty());
     messages.forEach((m, i) => $.messages.appendChild(renderMessage(m, i)));
     if (busy) {
-      const typing = make("div", "ai-msg model");
+      // Loading bubble: shown from the moment a question is sent until the answer is rendered.
+      const typing = make("div", "ai-msg model ai-loading");
       const bubble = make("div", "ai-bubble ai-typing");
       bubble.id = "aiTyping";
-      bubble.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
-      bubble.appendChild(make("span", "ai-typing-text"));
+      bubble.setAttribute("role", "status");
+      const dots = make("span", "ai-dots");
+      dots.setAttribute("aria-hidden", "true");
+      dots.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
+      bubble.appendChild(dots);
+      bubble.appendChild(make("span", "ai-typing-text", statusText));
       typing.appendChild(bubble);
       $.messages.appendChild(typing);
     }
@@ -201,9 +206,22 @@
     refreshAddButtons();
   }
 
-  function scrollToEnd() {
-    const last = $.messages.lastElementChild;
-    if (last) last.scrollIntoView({ behavior: "smooth", block: "end" });
+  /*
+   * Only the message list scrolls (the input bar is a normal block below it), so
+   * "newest message fully visible" is simply: list scrolled to its very bottom.
+   */
+  const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function scrollToEnd(smooth = true) {
+    const list = $.messages;
+    if (!list) return;
+    const snap = () => { list.scrollTop = list.scrollHeight; };
+    // Reading scrollHeight forces layout, so this works right after render().
+    if (smooth && !reduceMotion) list.scrollTo({ top: list.scrollHeight, behavior: "smooth" });
+    else snap();
+    // A smooth scroll can be cut short (backgrounded app, list still growing): always end at the bottom.
+    setTimeout(() => {
+      if (list.scrollHeight - list.scrollTop - list.clientHeight > 2) snap();
+    }, 400);
   }
 
   /* The list changed (item added/removed elsewhere): update the "in list" buttons. */
@@ -223,9 +241,11 @@
   }
 
   /* ---------- Talking to the server ---------- */
+  let statusText = STATUS.thinking;
   function setStatus(text) {
+    statusText = text || STATUS.thinking;
     const label = document.querySelector("#aiTyping .ai-typing-text");
-    if (label) label.textContent = text || "";
+    if (label) label.textContent = statusText;
   }
 
   /* Resolves true when the server answers /health, false on failure or after `ms`. */
@@ -318,6 +338,7 @@
     }
     const history = historyForServer();
     const myConversation = conversation;
+    statusText = STATUS.thinking;
     messages.push({ role: "user", text });
     $.input.value = "";
     busy = true;
@@ -354,7 +375,7 @@
     if (voice && voice.listening) voice.cancel();
     $.input.value = "";
     render();
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    $.messages.scrollTop = 0;
   }
 
   function setupVoice() {
@@ -402,6 +423,15 @@
     $.input.addEventListener("keydown", (e) => { if (e.key === "Enter") send($.input.value); });
     $.gateBtn.addEventListener("click", () => opts.onNeedAccount());
     $.newChat.addEventListener("click", newChat);
+
+    // The on-screen keyboard shrinks the list: stay pinned to the bottom if we were there.
+    let pinned = true;
+    $.messages.addEventListener("scroll", () => {
+      pinned = $.messages.scrollHeight - $.messages.scrollTop - $.messages.clientHeight < 40;
+    }, { passive: true });
+    const keepPinned = () => { if (pinned) scrollToEnd(false); };
+    (window.visualViewport || window).addEventListener("resize", keepPinned);
+    $.input.addEventListener("focus", () => setTimeout(keepPinned, 300));
     render();
   }
 

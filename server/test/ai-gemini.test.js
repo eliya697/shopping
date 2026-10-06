@@ -19,7 +19,7 @@ const fake = http.createServer((req, res) => {
     }
     const model = decodeURIComponent(/\/models\/([^:]+):generateContent/.exec(req.url)[1]);
     const body = JSON.parse(raw || "{}");
-    calls.push({ model, schema: !!body.generationConfig.responseSchema, key: req.headers["x-goog-api-key"] });
+    calls.push({ model, schema: !!body.generationConfig.responseSchema, thinking: body.generationConfig.thinkingConfig || null, key: req.headers["x-goog-api-key"] });
     const next = (script[model] || []).shift() || { status: 404, body: { error: { message: `models/${model} is not found` } } };
     res.writeHead(next.status, { "content-type": "application/json" });
     res.end(JSON.stringify(next.body));
@@ -92,6 +92,21 @@ const good = JSON.stringify({ reply: "שקשוקה!", sections: [{ title: "שק�
   assert.deepEqual(calls.map((c) => c.model), ["gemini-3-flash"]);
   // "not supported" about the request shape is a schema problem, not a missing model.
   assert.equal(ai.classify(400, "JSON mode is not supported for this model"), "schema");
+
+  // Speed: thinking is turned down where the setting is known, and dropped if a model rejects it.
+  assert.deepEqual(ai.thinkingConfigFor("gemini-2.5-flash"), { thinkingBudget: 0 });
+  assert.deepEqual(ai.thinkingConfigFor("gemini-3-flash"), { thinkingLevel: "low" });
+  assert.equal(ai.thinkingConfigFor("gemini-flash-latest"), null);
+  calls.length = 0;
+  script = { "gemini-3-flash": [{ status: 400, body: { error: { message: "Thinking level is not supported for this model." } } }, answer(good)] };
+  res = await ask();
+  assert.equal(res.reply, "שקשוקה!");
+  assert.deepEqual(calls.map((c) => c.thinking), [{ thinkingLevel: "low" }, null]);
+
+  // At most 8 products per answer, however many the model sends.
+  const many = (n, p) => Array.from({ length: n }, (_, i) => ({ name: `${p}${i}`, quantity: "", category: "misc" }));
+  const capped = ai.sanitizeAnswer({ reply: "x", sections: [{ title: "a", items: many(6, "a") }, { title: "b", items: many(6, "b") }, { title: "c", items: many(3, "c") }] });
+  assert.deepEqual(capped.sections.map((x) => x.items.length), [6, 2]);
 
   // Lenient parsing helpers
   assert.deepEqual(ai.parseLooseJson('Sure! {"reply":"x","sections":[]} hope it helps'), { reply: "x", sections: [] });

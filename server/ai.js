@@ -30,6 +30,8 @@ const GEMINI_API = process.env.GEMINI_API_BASE || "https://generativelanguage.go
 // "gemini-flash-latest" is Google's alias for the current Flash model. (gemini-1.5-* was retired in 2025.)
 const MODEL_CANDIDATES = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash"];
 const MAX_MODELS_PER_QUESTION = 5;
+// Short answers are fast answers: the prompt asks for at most 8 products and the server enforces it.
+const MAX_ITEMS_PER_ANSWER = 8;
 const REQUEST_TIMEOUT_MS = 25000;
 const MAX_ATTEMPTS_PER_MODEL = 3;
 const TOTAL_BUDGET_MS = 45000; // all models and retries together; the app waits 60s
@@ -78,7 +80,11 @@ function systemPrompt(now = new Date()) {
   return [
     "אתה עוזר חכם בתוך אפליקציית רשימת קניות ישראלית: מומחה לתכנון ארוחות, בישול ביתי וקניות חכמות בסופר.",
     `התאריך היום: ${date} (ישראל). כשנשאלים על עונתיות, התייחס לעונה הנוכחית בישראל ולמה שזמין וזול עכשיו בשווקים.`,
-    "ענה תמיד בעברית, בטון חם, ענייני ותמציתי (עד כ-120 מילים בשדה reply), בטקסט רגיל ללא Markdown.",
+    "ענה תמיד בעברית, בטון חם וענייני, בטקסט רגיל ללא Markdown. reply קצר: 1–3 משפטים (עד כ-50 מילים).",
+    "",
+    "מהירות לפני שלמות: הצע לכל היותר 6 עד 8 מוצרים רלוונטיים במיוחד בכל התשובה (סך הכל, בכל הקבוצות יחד),",
+    "בקבוצה אחת או שתיים לכל היותר. עדיף מעט מוצרים מדויקים מאשר רשימה ארוכה.",
+    "Provide a maximum of 6 to 8 highly relevant items per response. Prioritize speed and conciseness over exhaustive lists.",
     "",
     "חשוב מאוד: כל מוצר או מצרך שאתה ממליץ לקנות (מתכונים, רעיונות לארוחות, פירות וירקות העונה, קניות בתקציב,",
     "מזונות עשירים בחלבון וכו') חייב להופיע במערך sections — האפליקציה מציגה ליד כל פריט שם כפתור \"הוסף לרשימה\".",
@@ -137,6 +143,7 @@ function classify(status, message) {
   if (status === 400 && /api key|API_KEY/i.test(m)) return "invalid_key";
   if (status === 401 || status === 403) return /api key|API_KEY/i.test(m) ? "invalid_key" : "forbidden";
   if (status === 429) return "quota";
+  if (status === 400 && /thinking/i.test(m)) return "thinking";
   // Request-shape problems first: "JSON mode is not supported…" is not a missing model.
   if (status === 400 && /schema|response_mime_type|responseMimeType|mime type|JSON mode|Invalid JSON payload|Unknown name/i.test(m)) return "schema";
   if (status === 404 || /models\/\S+ is not found|not found for API version|not supported for generateContent|no longer available/i.test(m)) return "model_not_found";
@@ -252,7 +259,7 @@ function buildContents(history, message, listItems) {
 function sanitizeAnswer(raw) {
   const reply = clip(raw && raw.reply, 4000);
   const sections = (Array.isArray(raw && raw.sections) ? raw.sections : [])
-    .slice(0, 6)
+    .slice(0, 3)
     .map((s) => {
       const seen = new Set();
       const items = (Array.isArray(s && s.items) ? s.items : [])
@@ -266,7 +273,16 @@ function sanitizeAnswer(raw) {
       return { title: clip(s && s.title, 80), items };
     })
     .filter((s) => s.items.length);
-  return { reply: reply || (sections.length ? "הנה כמה הצעות:" : ""), sections };
+  // Enforce the item budget across all sections, whatever the model sent.
+  let budget = MAX_ITEMS_PER_ANSWER;
+  const trimmed = sections
+    .map((s) => {
+      const items = s.items.slice(0, budget);
+      budget -= items.length;
+      return { ...s, items };
+    })
+    .filter((s) => s.items.length);
+  return { reply: reply || (trimmed.length ? "הנה כמה הצעות:" : ""), sections: trimmed };
 }
 
 /* JSON from the model: plain, fenced in ```json, or with stray text around it. */
@@ -285,7 +301,20 @@ function parseLooseJson(text) {
   return null;
 }
 
-async function callModel({ apiKey, model, contents, useSchema, timeoutMs = REQUEST_TIMEOUT_MS }) {
+/*
+ * Gemini 2.5+ "thinks" before answering, which is most of the wait for a simple
+ * shopping answer. Turn it down where we know the setting: 2.5 Flash takes a token
+ * budget (0 = off), Gemini 3 a level. Unknown models/aliases get the default, and a
+ * model that rejects the setting is retried without it.
+ */
+function thinkingConfigFor(model) {
+  if (/^gemini-2\.5-flash/.test(model)) return { thinkingBudget: 0 };
+  if (/^gemini-[3-9]/.test(model) && /flash/.test(model)) return { thinkingLevel: "low" };
+  return null;
+}
+
+async function callModel({ apiKey, model, contents, useSchema, useThinkingConfig = true, timeoutMs = REQUEST_TIMEOUT_MS }) {
+  const thinkingConfig = useThinkingConfig ? thinkingConfigFor(model) : null;
   let res;
   try {
     res = await fetch(`${GEMINI_API}/models/${encodeURIComponent(model)}:generateContent`, {
@@ -300,6 +329,7 @@ async function callModel({ apiKey, model, contents, useSchema, timeoutMs = REQUE
           maxOutputTokens: 8192, // 2.5+ models count "thinking" tokens here too; too low truncates the JSON
           responseMimeType: "application/json",
           ...(useSchema ? { responseSchema: RESPONSE_SCHEMA } : {}),
+          ...(thinkingConfig ? { thinkingConfig } : {}),
         },
       }),
     });
@@ -333,11 +363,12 @@ async function askGemini({ apiKey, history, message, listItems }) {
 
   for (const model of modelOrder()) {
     let useSchema = true;
+    let useThinkingConfig = true;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_MODEL; attempt++) {
       const remaining = deadline - Date.now();
       if (remaining < 3000) throw lastError.reason === "model_not_found" ? new GeminiError("timeout", "out of time") : lastError;
       try {
-        const answer = await callModel({ apiKey, model, contents, useSchema, timeoutMs: Math.min(REQUEST_TIMEOUT_MS, remaining) });
+        const answer = await callModel({ apiKey, model, contents, useSchema, useThinkingConfig, timeoutMs: Math.min(REQUEST_TIMEOUT_MS, remaining) });
         if (health.model !== model) console.log(`[ai] now using model ${model}`);
         Object.assign(health, { ok: true, model, reason: null });
         return answer;
@@ -346,6 +377,10 @@ async function askGemini({ apiKey, history, message, listItems }) {
         console.warn(`[ai] attempt ${attempt} failed (${err.reason}): ${err.message}`);
         if (err.reason === "schema" && useSchema) {
           useSchema = false; // the prompt also describes the JSON shape
+          continue;
+        }
+        if (err.reason === "thinking" && useThinkingConfig) {
+          useThinkingConfig = false; // this model doesn't take our thinking setting: use its default
           continue;
         }
         if (err.reason === "model_not_found") {
@@ -464,4 +499,5 @@ aiRouter.askGemini = askGemini;
 aiRouter.health = health;
 aiRouter.modelOrder = modelOrder;
 aiRouter.rankFlashModels = rankFlashModels;
+aiRouter.thinkingConfigFor = thinkingConfigFor;
 module.exports = aiRouter;

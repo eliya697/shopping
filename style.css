@@ -1063,7 +1063,7 @@ input { font-family: inherit; color: inherit; }
   gap: 10px;
   padding: 6px 14px 12px;
 }
-.ai-msg { display: flex; flex-direction: column; gap: 8px; max-width: 92%; scroll-margin-bottom: calc(var(--nav-h) + 90px); }
+.ai-msg { display: flex; flex-direction: column; gap: 8px; max-width: 92%; flex: 0 0 auto; }
 .ai-msg.user { align-self: flex-start; } /* RTL: the user's own messages sit on the right */
 .ai-msg.model, .ai-msg.error { align-self: flex-end; width: 92%; }
 .ai-bubble {
@@ -1506,4 +1506,68 @@ strong.plain { color: var(--text); font-weight: 700; }
   text-align: left;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   word-break: break-word;
+}
+
+/* =====================================================================
+ * AI tab layout: a column exactly as tall as the screen above the bottom nav.
+ *   header / chips   fixed size
+ *   message list     flex: 1, the ONLY thing that scrolls
+ *   input bar        a normal block at the bottom (not fixed/sticky), so it can
+ *                    never cover a message
+ * ===================================================================== */
+#aiTab {
+  /* Not .tab-panel's flex: 1 1 0% — in a parent without a fixed height that basis
+     falls back to the content size and the column grows with every message. */
+  flex: 0 0 auto;
+  height: calc(100vh - var(--nav-h));
+  height: calc(100dvh - var(--nav-h));
+  min-height: 0;
+  overflow: hidden;
+}
+#aiTab > .app-header { position: relative; flex: 0 0 auto; }
+#aiTab > .ai-chips { flex: 0 0 auto; }
+#aiTab > .ai-messages {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 16px;
+}
+#aiTab > .ai-gate { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+#aiTab > #aiBar {
+  position: static;
+  flex: 0 0 auto;
+  background: var(--bg);
+  border-top: 1px solid var(--card-border);
+  padding: 10px 14px;
+}
+
+/* Loading bubble: "ה-AI חושב…" with three bouncing dots */
+.ai-msg.ai-loading .ai-bubble {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  align-self: flex-start;
+  border: 1px solid var(--card-border);
+  animation: loadingIn 0.2s ease;
+}
+.ai-dots { display: inline-flex; align-items: flex-end; gap: 4px; height: 14px; }
+.ai-dots .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-bright);
+  animation: dotBounce 1s ease-in-out infinite;
+}
+.ai-dots .dot:nth-child(2) { animation-delay: 0.15s; }
+.ai-dots .dot:nth-child(3) { animation-delay: 0.3s; }
+.ai-msg.ai-loading .ai-typing-text { margin: 0; font-size: 0.9rem; font-weight: 600; color: var(--text); }
+@keyframes dotBounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+  30% { transform: translateY(-6px); opacity: 1; }
+}
+@keyframes loadingIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .ai-dots .dot { animation: none; opacity: 0.8; }
 }
