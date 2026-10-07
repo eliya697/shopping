@@ -45,6 +45,7 @@
           </button>
           <div class="subtitle-row">
             <p class="subtitle" id="subtitle">הרשימה ריקה</p>
+            <span class="role-badge hidden" id="headerRoleBadge"></span>
             <button class="conn-pill hidden" id="connPill" aria-live="polite">
               <span class="sync-dot" id="syncDot"></span>
               <span id="connText"></span>
@@ -185,11 +186,29 @@
       <section class="card profile-card hidden" id="profileAccountSection">
         <div class="avatar" id="profileAvatar" aria-hidden="true"></div>
         <div class="profile-main">
-          <label class="profile-label" for="usernameInput">מחובר/ת בתור</label>
+          <div class="profile-label-row">
+            <label class="profile-label" for="usernameInput">מחובר/ת בתור</label>
+            <span class="role-badge" id="profileRoleBadge"></span>
+          </div>
           <input type="text" class="name-input" id="usernameInput" maxlength="30" placeholder="השם שלך" autocomplete="off" enterkeyhint="done">
           <div class="profile-sub" id="syncStatusText"></div>
         </div>
         <button class="btn btn-primary btn-sm hidden" id="saveUsernameBtn">שמירה</button>
+      </section>
+
+      <!-- Owner-only tools: rendered only for role "owner"; the server enforces it too -->
+      <section class="settings-group hidden" id="ownerToolsSection">
+        <h3 class="group-title">👑 כלי בעלים</h3>
+        <div class="card card-list owner-tools">
+          <button class="row row-btn" id="adminDashboardBtn">
+            <span class="row-icon">🛠️</span>
+            <div class="row-main">
+              <div class="row-title">לוח ניהול</div>
+              <div class="row-sub">משתמשים, רשימות, מצב השרת וגיבוי</div>
+            </div>
+            <span class="row-chev">‹</span>
+          </button>
+        </div>
       </section>
 
       <!-- Discover Premium -->
@@ -496,6 +515,27 @@
             <span class="share-opt-icon gallery">🖼️</span>
             <span>העלאה מהגלריה</span>
           </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Owner sign-in: links this account to ADMIN_EMAIL (needs ADMIN_SECRET_KEY) -->
+  <div class="modal-overlay hidden" id="ownerOverlay">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2>👑 כניסת בעלים</h2>
+        <button class="icon-btn" id="closeOwnerBtn" aria-label="סגור">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="welcome-text">חיבור החשבון הזה כחשבון הבעלים של האפליקציה. נדרשים האימייל של הבעלים ומפתח הניהול (ADMIN_SECRET_KEY) מהשרת.</p>
+        <label class="field-label" for="ownerEmailInput">אימייל</label>
+        <input class="text-field" type="email" id="ownerEmailInput" dir="ltr" autocomplete="username" maxlength="120">
+        <label class="field-label" for="ownerKeyInput">מפתח ניהול</label>
+        <input class="text-field" type="password" id="ownerKeyInput" dir="ltr" autocomplete="current-password" maxlength="200">
+        <div class="welcome-status hidden" id="ownerStatus"></div>
+        <div class="sheet-actions">
+          <button class="small-btn primary grow" id="ownerClaimBtn">אימות וחיבור</button>
         </div>
       </div>
     </div>

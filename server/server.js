@@ -126,8 +126,31 @@ app.get("/api/me", requireDb, async (req, res) => {
   res.json({ user, lists: await store.getListsForUser(user.userId) });
 });
 
+/*
+ * RBAC guard for /api/admin/*. Passes:
+ *   - a dashboard session token (from /api/admin/login), or
+ *   - the token of the app account whose role is "owner" (see roles.js).
+ * No/unknown credentials -> 401; a valid account that isn't the owner -> 403.
+ */
+async function requireAdmin(req, res, next) {
+  const token = (req.get("authorization") || "").replace(/^Bearer\s+/i, "");
+  if (!token) return res.status(401).json({ error: "authentication required", code: "ADMIN_UNAUTHORIZED" });
+  if (adminRouter.verifyAdminSession(token)) {
+    req.admin = { via: "session" };
+    return next();
+  }
+  if (!store.isReady()) {
+    return res.set("Retry-After", "3").status(503).json({ error: "server is starting, try again", code: "SERVER_UNAVAILABLE" });
+  }
+  const user = await store.findUserByToken(token);
+  if (!user) return res.status(401).json({ error: "admin session invalid or expired", code: "ADMIN_UNAUTHORIZED" });
+  if (!user.isAdmin) return res.status(403).json({ error: "forbidden: owner only", code: "FORBIDDEN" });
+  req.admin = { via: "owner", user };
+  next();
+}
+
 app.use("/api/pair", pairingRouter());
-app.use("/api/admin", adminRouter(sockets));
+app.use("/api/admin", adminRouter(sockets, requireAdmin));
 
 app.use((err, _req, res, _next) => {
   if (err.message?.includes("CORS")) return res.status(403).json({ error: err.message });

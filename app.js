@@ -17,6 +17,7 @@
     storeOrder: "shoppingList.storeOrder.v1",
     learnedCategories: "shoppingList.learnedCategories.v1",
     pendingJoin: "shoppingList.pendingJoin.v1",
+    adminSession: "shoppingList.adminSession", // read by admin.html (same origin)
   };
 
   const BACKEND_URL = ((window.APP_CONFIG && window.APP_CONFIG.BACKEND_URL) || "").replace(/\/+$/, "");
@@ -71,7 +72,7 @@
   let viewMode = "store"; // "store" (grouped by supermarket aisle) | "list"
   let storeOrder = Categories.DEFAULT_STORE_ORDER.slice();
 
-  let account = null; // { userId, username, token }
+  let account = null; // { userId, username, token, role: "owner" | "user", isAdmin }
   let lists = []; // { listId, ownerId, ownerName, name, memberCount, remaining }
   let activeListId = null;
   let listInfo = null; // { listId, ownerId, name, members: [{ userId, username }] }
@@ -167,6 +168,9 @@
     "bottomNav", "profileGuestSection", "profileSyncBtn", "profileAccountSection", "profileSyncSection",
     "syncDetailText", "syncNowBtn", "profileListsBtn", "profileTemplatesBtn", "profileOrderBtn", "deviceSection",
     "appVersion", "premiumBtn", "notifySwitch", "notifySub", "themeSwitch",
+    // roles
+    "headerRoleBadge", "profileRoleBadge", "ownerToolsSection", "adminDashboardBtn", "ownerOverlay",
+    "closeOwnerBtn", "ownerEmailInput", "ownerKeyInput", "ownerStatus", "ownerClaimBtn",
     // share fallback
     "shareFallbackOverlay", "closeShareFallbackBtn", "shareWhatsappLink", "shareSmsLink",
     // fridge vision
@@ -1500,6 +1504,123 @@
     $.connPill.title = STATUS_TEXT[syncStatus] + (pendingCount ? ` (${pendingCount} שינויים ממתינים)` : "");
   }
 
+  /* ---------- Roles (RBAC) ----------
+   * The server decides the role (owner = the account verified as ADMIN_EMAIL) and
+   * sends it with the user object; this only shows or hides UI. Every admin
+   * endpoint checks the role again on the server, so hiding is cosmetic, not security.
+   */
+  const ROLE_LABEL = { owner: "👑 בעלים", user: "חבר" };
+  const isOwnerAccount = () => !!(account && account.isAdmin && account.role === "owner");
+
+  /* Merge a user object from the server (register, pairing, socket session, rename). */
+  function applyUser(user) {
+    if (!account || !user) return;
+    account.username = user.username || account.username;
+    if (user.role) {
+      account.role = user.role === "owner" ? "owner" : "user";
+      account.isAdmin = account.role === "owner" && user.isAdmin === true;
+    }
+    writeJSON(STORAGE_KEYS.account, account);
+    renderRole();
+  }
+
+  function renderRole() {
+    const signedIn = !!account;
+    const owner = isOwnerAccount();
+    [$.headerRoleBadge, $.profileRoleBadge].forEach((badge) => {
+      badge.classList.toggle("hidden", !signedIn);
+      badge.classList.toggle("owner", owner);
+      badge.textContent = owner ? ROLE_LABEL.owner : ROLE_LABEL.user;
+      badge.title = owner ? "בעלי האפליקציה — גישה לכלי הניהול" : "חבר באפליקציה";
+    });
+    // Regular users get no admin UI at all, not a disabled one.
+    $.ownerToolsSection.classList.toggle("hidden", !owner);
+  }
+
+  function saveAdminSession(session) {
+    if (session && session.token && !Native.isApp) writeJSON(STORAGE_KEYS.adminSession, session);
+  }
+
+  /* Owner sign-in: proves ADMIN_EMAIL + ADMIN_SECRET_KEY once, then this account is the owner. */
+  function setOwnerStatus(text, isError) {
+    $.ownerStatus.textContent = text;
+    $.ownerStatus.classList.toggle("hidden", !text);
+    $.ownerStatus.classList.toggle("error", !!isError);
+  }
+
+  function openOwnerSignIn() {
+    if (!account || !BACKEND_URL) return;
+    setOwnerStatus("");
+    $.ownerKeyInput.value = "";
+    openSheet($.ownerOverlay);
+    $.ownerEmailInput.focus();
+  }
+
+  async function claimOwner() {
+    const email = $.ownerEmailInput.value.trim();
+    const secretKey = $.ownerKeyInput.value;
+    if (!email || !secretKey) return setOwnerStatus("מלאו אימייל ומפתח ניהול", true);
+    $.ownerClaimBtn.disabled = true;
+    setOwnerStatus("מאמת…");
+    try {
+      const res = await backendFetch("/api/admin/claim-owner", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + account.token },
+        body: JSON.stringify({ email, secretKey }),
+      }, (text) => setOwnerStatus(text));
+      if (!res.ok) {
+        const text = res.status === 429 ? "יותר מדי ניסיונות. נסו שוב בעוד 15 דקות."
+          : res.body.code === "ADMIN_DISABLED" ? "כלי הניהול כבויים בשרת (ADMIN_SECRET_KEY לא מוגדר)."
+          : res.body.code === "INVALID_TOKEN" ? "החשבון לא אומת מול השרת."
+          : res.status === 401 ? "האימייל או מפתח הניהול שגויים."
+          : "האימות נכשל. נסו שוב.";
+        setOwnerStatus(text, true);
+        return;
+      }
+      applyUser(res.body.user);
+      saveAdminSession(res.body.session);
+      $.ownerKeyInput.value = "";
+      closeSheet($.ownerOverlay);
+      toast({ text: "החשבון חובר כחשבון הבעלים", icon: "👑", ms: 3500 });
+    } catch (e) {
+      setOwnerStatus("השרת לא הגיב. נסו שוב בעוד רגע.", true);
+    } finally {
+      $.ownerClaimBtn.disabled = false;
+    }
+  }
+
+  function openExternalUrl(url) {
+    if (Native.isApp) location.href = url; // Capacitor hands non-app URLs to the system browser
+    else window.open(url, "_blank", "noopener");
+  }
+
+  /* Owner tool: open the web dashboard already signed in (a fresh 12h session from the owner token). */
+  async function openAdminDashboard() {
+    if (!isOwnerAccount()) return;
+    if (Native.isApp) {
+      openExternalUrl((PUBLIC_URL || appBaseUrl()) + "admin.html"); // separate browser storage: sign in there
+      return;
+    }
+    const tab = window.open("", "_blank"); // open inside the tap, so popup blockers allow it
+    try {
+      const res = await backendFetch("/api/admin/session", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + account.token },
+      }, () => {});
+      if (res.status === 403) {
+        // The server no longer sees this account as the owner: drop the owner UI.
+        applyUser({ username: account.username, role: "user", isAdmin: false });
+        if (tab) tab.close();
+        showToast("לחשבון הזה כבר אין הרשאות בעלים", 3500);
+        return;
+      }
+      if (res.ok) saveAdminSession(res.body);
+    } catch (e) {}
+    const url = appBaseUrl() + "admin.html";
+    if (tab) tab.location.href = url;
+    else location.href = url;
+  }
+
   /* ---------- Profile tab ---------- */
   let aiSignedIn = null;
 
@@ -1513,6 +1634,7 @@
 
     const name = account.username || "";
     $.profileAvatar.textContent = (name.trim()[0] || "?").toUpperCase();
+    renderRole();
     if (document.activeElement !== $.usernameInput) $.usernameInput.value = name;
     updateSaveNameBtn();
     $.syncStatusText.innerHTML = "";
@@ -1871,8 +1993,7 @@
     if (!username || username === account.username) return;
     const res = await sync.request("user:rename", { username });
     if (!res.ok) return needsConnection(res);
-    account.username = res.user.username;
-    writeJSON(STORAGE_KEYS.account, account);
+    applyUser(res.user);
     $.usernameInput.blur();
     showToast("השם עודכן");
   }
@@ -1885,13 +2006,14 @@
       sync = null;
     }
     lists.forEach((l) => removeKey(STORAGE_KEYS.listCachePrefix + l.listId));
-    [STORAGE_KEYS.account, STORAGE_KEYS.lists, STORAGE_KEYS.activeList].forEach(removeKey);
+    [STORAGE_KEYS.account, STORAGE_KEYS.lists, STORAGE_KEYS.activeList, STORAGE_KEYS.adminSession].forEach(removeKey);
     account = null;
     lists = [];
     activeListId = null;
     listInfo = null;
     syncStatus = "offline";
     pendingCount = 0;
+    renderRole();
     saveItems(); // now writes to the local-only key
     render();
     renderAccountUI();
@@ -1987,8 +2109,7 @@
     });
 
     client.on("session", ({ user, lists: serverLists }) => {
-      account.username = user.username;
-      writeJSON(STORAGE_KEYS.account, account);
+      applyUser(user);
       applyLists(serverLists);
     });
 
@@ -2211,8 +2332,8 @@
     const { user, token, listId } = res.body;
 
     const localItems = items.slice();
-    account = { userId: user.userId, username: user.username, token };
-    writeJSON(STORAGE_KEYS.account, account);
+    account = { userId: user.userId, username: user.username, token, role: "user", isAdmin: false };
+    applyUser(user);
     lists = [{ listId, ownerId: user.userId, ownerName: user.username, name: null, memberCount: 1, remaining: 0 }];
     saveLists();
     setActiveList(listId);
@@ -2284,8 +2405,8 @@
       const { token, user, lists: serverLists } = res.body;
 
       // Keep this device's local-only list untouched under its own key.
-      account = { userId: user.userId, username: user.username, token };
-      writeJSON(STORAGE_KEYS.account, account);
+      account = { userId: user.userId, username: user.username, token, role: "user", isAdmin: false };
+      applyUser(user);
       lists = serverLists;
       saveLists();
       setActiveList(ownListId());
@@ -2483,6 +2604,21 @@
     if (digits.length === 6) linkDevice(digits);
   });
   $.logoutBtn.addEventListener("click", logout);
+
+  // Roles: owner tools, and a hidden owner sign-in (tap the version line 5 times).
+  $.adminDashboardBtn.addEventListener("click", openAdminDashboard);
+  wireSheet($.ownerOverlay, $.closeOwnerBtn, () => { $.ownerKeyInput.value = ""; });
+  $.ownerClaimBtn.addEventListener("click", claimOwner);
+  $.ownerKeyInput.addEventListener("keydown", (e) => { if (e.key === "Enter") claimOwner(); });
+  let versionTaps = [];
+  $.appVersion.addEventListener("click", () => {
+    const now = Date.now();
+    versionTaps = versionTaps.filter((t) => now - t < 2000).concat(now);
+    if (versionTaps.length >= 5 && account && !isOwnerAccount()) {
+      versionTaps = [];
+      openOwnerSignIn();
+    }
+  });
 
   // Profile tab
   $.premiumBtn.addEventListener("click", () => {

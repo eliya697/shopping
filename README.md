@@ -171,9 +171,19 @@ A device that already has items never loses them to an empty server answer. If t
 
 `admin.html` isn't linked from the app. Log in with the admin email and `ADMIN_SECRET_KEY`. You get a 12-hour HMAC-signed session token, stored in `localStorage` and sent as `Authorization: Bearer …`. Failed logins are limited to 5 per 15 minutes per IP.
 
+#### Roles (RBAC)
+
+There are two roles: `owner` (בעלים) and `user` (חבר). An account is the owner only when its **verified** email equals `ADMIN_EMAIL` (default `eliyamistriel1234@gmail.com`). Accounts are name-only, with no passwords, so an email is never accepted from user input alone. It is stored on an account only by `POST /api/admin/claim-owner`, which also requires `ADMIN_SECRET_KEY`. At most one account holds it: claiming from another account moves the role. Every user object the server returns carries `role` and `isAdmin`, but never the email.
+
+In the app, tap the version line at the bottom of Profile 5 times to open *כניסת בעלים*. The owner sees a gold *בעלים* badge and a *כלי בעלים* section; everyone else sees *חבר* and no admin UI at all.
+
+Every `/api/admin/*` route except `check`, `login` and `claim-owner` is behind `requireAdmin` in `server.js`. It accepts a dashboard session token or the owner account's token. Missing or unknown credentials get `401`; a valid account that isn't the owner gets `403 { code: "FORBIDDEN" }`.
+
 | Endpoint | |
 |---|---|
 | `POST /api/admin/login` | `{ email, secretKey }` → `{ token, expiresAt }` |
+| `POST /api/admin/claim-owner` | app account token + `{ email, secretKey }` → `{ user, session }`; makes that account the owner |
+| `POST /api/admin/session` | owner account token → a fresh dashboard session (used by Profile → לוח ניהול) |
 | `GET /api/admin/health` | uptime, memory, active sockets, DB status/latency/size/counts |
 | `GET /api/admin/users` · `DELETE /api/admin/users/:id` | users with last activity and list ids; deleting removes their owned lists and memberships and disconnects them |
 | `GET /api/admin/lists` · `DELETE /api/admin/lists/:id` | lists with item/member counts; members are evicted live |

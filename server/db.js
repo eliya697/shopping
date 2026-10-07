@@ -17,6 +17,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { createClient } = require("@libsql/client");
+const { roleForEmail, normalizeEmail } = require("./roles");
 
 const REMOTE_URL = (process.env.TURSO_DATABASE_URL || "").trim();
 const LOCAL_PATH = process.env.DB_PATH || path.join(__dirname, "data", "shopping.db");
@@ -98,6 +99,8 @@ async function migrate() {
   }
   if (!itemCols.has("notes")) steps.push("ALTER TABLE items ADD COLUMN notes TEXT NOT NULL DEFAULT ''");
   if (!userCols.has("last_seen_at")) steps.push("ALTER TABLE users ADD COLUMN last_seen_at INTEGER");
+  // Verified email: set only through the owner claim (see roles.js). NULL for everyone else.
+  if (!userCols.has("email")) steps.push("ALTER TABLE users ADD COLUMN email TEXT");
   steps.push("CREATE UNIQUE INDEX IF NOT EXISTS idx_lists_share_code ON lists(share_code)");
   steps.push("CREATE INDEX IF NOT EXISTS idx_items_completed ON items(is_completed, updated_at)");
   await writeBatch(steps);
@@ -156,7 +159,8 @@ const normalizeCode = (code) => String(code || "").toUpperCase().replace(/[^A-Z0
 const normalizeText = (t) => String(t).trim().toLowerCase().replace(/\s+/g, " ");
 
 /* ---------- Row -> API shape ---------- */
-const toUser = (r) => r && { userId: r.user_id, username: r.username, createdAt: r.created_at };
+/* The email itself never leaves the server: clients only see the role derived from it. */
+const toUser = (r) => r && { userId: r.user_id, username: r.username, createdAt: r.created_at, ...roleForEmail(r.email) };
 const toItem = (r) => r && {
   itemId: r.item_id,
   listId: r.list_id,
@@ -201,7 +205,7 @@ async function createUser(username) {
     q(SQL.insertList, [listId, userId, null, now]),
     q(SQL.insertMember, [listId, userId, now]),
   ]);
-  return { user: { userId, username, createdAt: now }, token, listId };
+  return { user: { userId, username, createdAt: now, ...roleForEmail(null) }, token, listId };
 }
 
 /*
@@ -210,10 +214,23 @@ async function createUser(username) {
  */
 async function findUserByToken(token) {
   if (!token) return null;
-  return toUser(await get("SELECT user_id, username, created_at FROM users WHERE token_hash = ?", [hashToken(token)]));
+  return toUser(await get("SELECT user_id, username, created_at, email FROM users WHERE token_hash = ?", [hashToken(token)]));
 }
 const findUserById = async (userId) =>
-  toUser(await get("SELECT user_id, username, created_at FROM users WHERE user_id = ?", [userId]));
+  toUser(await get("SELECT user_id, username, created_at, email FROM users WHERE user_id = ?", [userId]));
+
+/*
+ * Attach a verified email to an account, taking it off any other account first, so
+ * at most one account can ever hold the owner email. Callers must have verified it.
+ */
+async function setVerifiedEmail(userId, email) {
+  const clean = normalizeEmail(email);
+  const [, updated] = await writeBatch([
+    q("UPDATE users SET email = NULL WHERE email = ? AND user_id <> ?", [clean, userId]),
+    q("UPDATE users SET email = ? WHERE user_id = ?", [clean, userId]),
+  ]);
+  return updated.rowsAffected > 0 ? findUserById(userId) : null;
+}
 const renameUser = (userId, username) => run("UPDATE users SET username = ? WHERE user_id = ?", [username, userId]);
 const touchUser = (userId) => run("UPDATE users SET last_seen_at = ? WHERE user_id = ?", [Date.now(), userId]);
 
@@ -382,7 +399,7 @@ async function adminStats() {
 
 async function adminListUsers() {
   const [users, memberships] = await readBatch([
-    "SELECT user_id, username, created_at, last_seen_at FROM users ORDER BY COALESCE(last_seen_at, created_at) DESC",
+    "SELECT user_id, username, created_at, last_seen_at, email FROM users ORDER BY COALESCE(last_seen_at, created_at) DESC",
     "SELECT user_id, list_id FROM list_members ORDER BY joined_at",
   ]);
   const byUser = new Map();
@@ -395,6 +412,7 @@ async function adminListUsers() {
     username: u.username,
     createdAt: u.created_at,
     lastSeenAt: u.last_seen_at,
+    role: roleForEmail(u.email).role,
     listIds: byUser.get(u.user_id) || [],
   }));
 }
@@ -498,6 +516,7 @@ module.exports = {
   createUser,
   findUserByToken,
   findUserById,
+  setVerifiedEmail,
   renameUser,
   touchUser,
   getList,

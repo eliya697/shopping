@@ -5,7 +5,12 @@
  *
  * Login: POST /api/admin/login { email, secretKey } with the admin email and the
  * ADMIN_SECRET_KEY environment variable. Returns a signed session token (12h).
- * Every other route needs `Authorization: Bearer <admin token>`.
+ *
+ * Owner account: POST /api/admin/claim-owner { email, secretKey } with an app
+ * account's token marks that account as the owner (role "owner", see roles.js).
+ *
+ * Every other route is behind server.js's requireAdmin middleware: an admin
+ * session token or the owner account's token passes, a regular account gets 403.
  *
  * Tokens are HMAC-signed with ADMIN_SECRET_KEY, so they survive restarts and
  * rotating the key logs every admin session out.
@@ -17,6 +22,7 @@
 const crypto = require("crypto");
 const express = require("express");
 const store = require("./db");
+const roles = require("./roles");
 
 const MIN_KEY_LENGTH = 16;
 // ADMIN_SECRET_KEY is the documented name; the others are accepted (with a warning) to survive typos.
@@ -52,7 +58,7 @@ const REASON_TEXT = {
 const keyConfig = loadAdminKey();
 const SECRET = keyConfig.value;
 const ENABLED = !keyConfig.reason;
-const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || "eliyamistriel1234@gmail.com").trim().toLowerCase();
+const ADMIN_EMAIL = roles.adminEmail();
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const CLEANUP_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 const ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
@@ -97,7 +103,27 @@ const handle = (fn) => async (req, res) => {
   }
 };
 
-function adminRouter(sockets) {
+/* Shared brute-force guard for every endpoint that checks ADMIN_SECRET_KEY. */
+function loginBlocked(ip) {
+  const record = loginFails.get(ip);
+  return !!record && Date.now() - record.since < LOGIN_FAILS_WINDOW_MS && record.count >= LOGIN_FAILS_MAX;
+}
+function recordLoginFailure(ip) {
+  const now = Date.now();
+  const record = loginFails.get(ip);
+  const fresh = !record || now - record.since >= LOGIN_FAILS_WINDOW_MS;
+  loginFails.set(ip, fresh ? { since: now, count: 1 } : { ...record, count: record.count + 1 });
+}
+/* Both compared every time, so timing doesn't reveal which one was wrong. */
+function credentialsOk(body) {
+  const emailOk = safeEqual(roles.normalizeEmail(body?.email), ADMIN_EMAIL);
+  const keyOk = safeEqual(String(body?.secretKey || "").trim(), SECRET);
+  return emailOk && keyOk;
+}
+
+/* requireAdmin: the middleware from server.js that guards every non-public route. */
+function adminRouter(sockets, requireAdmin) {
+  if (typeof requireAdmin !== "function") throw new Error("adminRouter needs the requireAdmin middleware");
   const router = express.Router();
 
   router.use((_req, res, next) => {
@@ -121,30 +147,44 @@ function adminRouter(sockets) {
   });
 
   router.post("/login", (req, res) => {
-    const now = Date.now();
-    const record = loginFails.get(req.ip);
-    if (record && now - record.since < LOGIN_FAILS_WINDOW_MS && record.count >= LOGIN_FAILS_MAX) {
-      return res.status(429).json({ error: "too many attempts, try again later" });
-    }
-    const email = String(req.body?.email || "").trim().toLowerCase();
-    const key = String(req.body?.secretKey || "").trim();
-    // Evaluate both so timing doesn't reveal which one was wrong.
-    const emailOk = safeEqual(email, ADMIN_EMAIL);
-    const keyOk = safeEqual(key, SECRET);
-    if (!(emailOk && keyOk)) {
-      const fresh = !record || now - record.since >= LOGIN_FAILS_WINDOW_MS;
-      loginFails.set(req.ip, fresh ? { since: now, count: 1 } : { ...record, count: record.count + 1 });
+    if (loginBlocked(req.ip)) return res.status(429).json({ error: "too many attempts, try again later" });
+    if (!credentialsOk(req.body)) {
+      recordLoginFailure(req.ip);
       return res.status(401).json({ error: "invalid credentials" });
     }
     loginFails.delete(req.ip);
     res.json(issueToken());
   });
 
-  /* Everything below requires a valid admin token. */
-  router.use((req, res, next) => {
+  /*
+   * Link the calling app account (Bearer <account token>) to the owner email. The
+   * secret key is the proof of identity: accounts have no passwords, so typing the
+   * email alone must never be enough. Any other account holding the email loses it.
+   */
+  router.post("/claim-owner", handle(async (req, res) => {
+    if (loginBlocked(req.ip)) return res.status(429).json({ error: "too many attempts, try again later" });
     const token = (req.get("authorization") || "").replace(/^Bearer\s+/i, "");
-    if (!verifyToken(token)) return res.status(401).json({ error: "admin session invalid or expired", code: "ADMIN_UNAUTHORIZED" });
-    next();
+    const user = token ? await store.findUserByToken(token) : null;
+    if (!user) return res.status(401).json({ error: "sign in to the app first", code: "INVALID_TOKEN" });
+    if (!credentialsOk(req.body)) {
+      recordLoginFailure(req.ip);
+      return res.status(401).json({ error: "invalid credentials" });
+    }
+    loginFails.delete(req.ip);
+    const owner = await store.setVerifiedEmail(user.userId, ADMIN_EMAIL);
+    console.log(`[admin] account ${user.userId} is now the owner`);
+    res.json({ user: owner, session: issueToken() });
+  }));
+
+  /* Everything below: owner or admin session only (401 without credentials, 403 for regular users). */
+  router.use(requireAdmin);
+
+  /* The owner account opens the web dashboard without typing the secret key again. */
+  router.post("/session", (req, res) => {
+    if (!req.admin || req.admin.via !== "owner") {
+      return res.status(403).json({ error: "only the owner account can open a session", code: "FORBIDDEN" });
+    }
+    res.json(issueToken());
   });
 
   router.get("/health", handle(async (_req, res) => {
@@ -232,3 +272,4 @@ function describeAdminConfig() {
 module.exports = adminRouter;
 module.exports.describeAdminConfig = describeAdminConfig;
 module.exports.loadAdminKey = loadAdminKey;
+module.exports.verifyAdminSession = (token) => ENABLED && verifyToken(token);
