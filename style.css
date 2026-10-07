@@ -1434,6 +1434,34 @@ label.row, .row-btn { cursor: pointer; }
   box-shadow: 0 0 12px rgba(0, 230, 118, 0.35);
 }
 .ai-add-all:disabled { background: var(--glass-bg-strong); color: var(--text-dim); box-shadow: none; }
+
+/* The recipe's missing ingredients: one tap adds them all to the active list. */
+.ai-card.missing { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft), var(--shadow); }
+.ai-import-btn {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 12px 16px;
+  font-size: 0.95rem;
+}
+.ai-import-btn:not(:disabled):active { transform: scale(0.98); }
+
+/* The answer while it is being written. */
+.ai-bubble.streaming::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-inline-start: 2px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  border-radius: 2px;
+  animation: aiCaret 0.9s steps(2, start) infinite;
+}
+@keyframes aiCaret { to { visibility: hidden; } }
+@media (prefers-reduced-motion: reduce) {
+  .ai-bubble.streaming::after { animation: none; opacity: 0.6; }
+}
 .ai-item { display: flex; align-items: center; gap: 10px; padding: 8px 0; }
 .ai-item + .ai-item { border-top: 1px solid var(--glass-border); }
 .ai-item-emoji {

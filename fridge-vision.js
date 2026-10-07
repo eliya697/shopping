@@ -1,12 +1,8 @@
 /*
  * FridgeVision — "AI Fridge Vision": the user photographs their fridge (camera)
- * or picks a photo (gallery), and the image is prepared for the Gemini vision
- * model to detect which groceries are missing.
- *
- * The backend has no vision endpoint yet, so analyzeFridgeImage() is a stub: it
- * does all the client-side work (validate, downscale, JPEG-encode, base64) and
- * returns the request body in Gemini's `inlineData` shape, ready to POST once
- * VISION_ENDPOINT exists on the server.
+ * or picks a photo (gallery). This module prepares the photo (validate, downscale,
+ * JPEG-encode, base64); AIChat.sendPhoto() asks the AI Chef about it, streamed like any
+ * other question, with the missing groceries as a one-tap "add to list" card.
  */
 (function (root) {
   "use strict";
@@ -14,11 +10,9 @@
   const MAX_SIDE = 1024; // Gemini tiles images at ~768px; more only costs upload time
   const JPEG_QUALITY = 0.82;
   const MAX_INPUT_BYTES = 25 * 1024 * 1024;
-  const VISION_ENDPOINT = null; // e.g. "/api/ai/vision" once the server supports it
 
-  const PROMPT =
-    "זו תמונה של המקרר/המזווה שלי. זהה אילו מצרכים בסיסיים חסרים או כמעט נגמרו, " +
-    "והחזר רשימת קניות מסודרת לפי מחלקות בסופר.";
+  // Shown as the user's message in the chat, and sent to the model with the photo.
+  const QUESTION = "📸 מה אפשר לבשל ממה שיש לי, ומה חסר?";
 
   function loadImage(file) {
     return new Promise((resolve, reject) => {
@@ -47,23 +41,5 @@
     return { dataUrl, base64, mimeType: "image/jpeg", width, height, bytes: Math.round(base64.length * 0.75) };
   }
 
-  /*
-   * Stub: prepares `file` for the Gemini vision model.
-   * options: { listItems: string[] } — what's already on the list, so it isn't suggested again.
-   * Resolves { ready, image, payload } where payload is the future request body.
-   */
-  async function analyzeFridgeImage(file, options = {}) {
-    const image = await prepareImage(file);
-    const payload = {
-      message: PROMPT,
-      listItems: options.listItems || [],
-      image: { inlineData: { mimeType: image.mimeType, data: image.base64 } },
-    };
-    // TODO(server): POST payload to VISION_ENDPOINT with the account token, and hand the
-    // returned { reply, sections } to the AI chat exactly like /api/ai/chat answers.
-    return { ready: !!VISION_ENDPOINT, endpoint: VISION_ENDPOINT, image, payload };
-  }
-
-  root.FridgeVision = { prepareImage, analyzeFridgeImage };
-  root.analyzeFridgeImage = analyzeFridgeImage;
+  root.FridgeVision = { prepareImage, QUESTION };
 })(window);

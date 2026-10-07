@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --env-file-if-exists=.env --watch server.js",
-    "test": "node test/ai-gemini.test.js && node test/v2.test.js && node test/v1-compat.test.js && node test/admin.test.js && node test/ai.test.js && node test/pairing.test.js && node test/rbac.test.js"
+    "test": "node test/ai-gemini.test.js && node test/ai-stream.test.js && node test/v2.test.js && node test/v1-compat.test.js && node test/admin.test.js && node test/ai.test.js && node test/pairing.test.js && node test/rbac.test.js"
   },
   "dependencies": {
     "@libsql/client": "^0.18.0",

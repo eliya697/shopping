@@ -1,7 +1,12 @@
 /*
- * AIChat — the "AI assistant" tab: a chat with the Gemini-backed /api/ai/chat
- * endpoint. Suggested products come back as structured sections and are shown
- * as cards with one-tap "add to list" buttons.
+ * AIChat — the "AI assistant" tab: a chat with the Gemini-backed /api/ai/chat/stream
+ * endpoint. The answer is shown as it is written (Server-Sent Events read with fetch);
+ * when it is complete, suggested products and the ingredients missing for the recipe
+ * arrive as structured lists, shown as cards with one-tap "add to list" buttons.
+ *
+ * Photos (Fridge Vision) are sent once, with the question they belong to. The server
+ * answers with a text summary of the photo, and later turns send that summary instead of
+ * the image, so follow-up questions stay small and fast.
  *
  * The conversation lives in memory only: every app start (and "שיחה חדשה") begins
  * fresh, showing just the suggestion chips. The app supplies the
@@ -13,13 +18,16 @@
 
   const LEGACY_STORAGE_KEY = "shoppingList.aiChat.v1"; // older versions saved the chat; removed on start
   const HISTORY_TURNS = 12;
-  const REQUEST_TIMEOUT_MS = 60000; // one attempt; Gemini itself is retried on the server
+  const REQUEST_TIMEOUT_MS = 60000; // until the server starts answering; Gemini itself is retried on the server
+  const STREAM_IDLE_MS = 40000; // silence allowed mid-answer (the server sends a ping every 15s)
+  const CHAT_PATH = "/api/ai/chat/stream";
   const WAKE_DEADLINE_MS = 100000; // a sleeping Render instance can take ~50s (sometimes more) to boot
   const WAKE_HINT_AFTER_MS = 2500; // /health not answering by then = the server is asleep
 
   const STATUS = {
     waking: "השרת מתעורר, מיד מתחברים…",
     thinking: "ה-AI חושב…",
+    analyzing: "מנתח את התמונה…",
   };
 
   const PROMPTS = [
@@ -45,6 +53,8 @@
     bad_response: "התקבלה תשובה משובשת מהעוזר. נסו לנסח את השאלה מחדש.",
     offline: "אין חיבור לאינטרנט. נסו שוב כשתהיו מחוברים.",
     asleep: "השרת לא התעורר בזמן. נסו שוב בעוד רגע.",
+    interrupted: "החיבור נקטע באמצע התשובה. נסו שוב.",
+    BAD_IMAGE: "לא הצלחנו לשלוח את התמונה. נסו תמונה אחרת.",
     default: "העוזר לא זמין כרגע. נסו שוב.",
   };
   const NOT_RETRYABLE = new Set(["AI_DISABLED", "RATE_LIMITED", "invalid_key", "forbidden"]);
@@ -60,12 +70,15 @@
 
   let opts = null;
   let $ = {};
-  // { role: "user" | "model", text, sections?, image?, local?: true, error?: true, detail?, retryText? }
-  // `local` messages (e.g. a Fridge Vision photo) are shown but never sent as history.
+  // { role: "user" | "model", text, sections?, missing?, image?, imageSummary?, streaming?, partial?,
+  //   local?: true, error?: true, detail?, retry?: { text, image } }
+  // `local` messages are shown but never sent as history; `image` is a data URL for display only.
   let messages = [];
   let busy = false;
   let voice = null;
   let conversation = 0; // bumped by "new chat"; answers to an older conversation are dropped
+  let inFlight = null; // AbortController of the question being answered
+  let pinned = true; // the message list is scrolled to the bottom
   // After a send, sending is locked for a moment so a double tap can't fire two
   // Gemini requests (each one counts against the API quota).
   const SEND_COOLDOWN_MS = 3000;
@@ -77,13 +90,18 @@
     try { localStorage.removeItem(LEGACY_STORAGE_KEY); } catch (e) {}
   }
 
-  /* What the model said before, compacted: its text plus the product names it suggested. */
+  /*
+   * The conversation so far, compacted to text: photos become their summary, and the
+   * model's turns carry the product names it suggested.
+   */
   function historyForServer() {
     return messages
-      .filter((m) => !m.error && !m.local)
+      .filter((m) => !m.error && !m.local && !m.partial && !m.streaming)
       .slice(-HISTORY_TURNS)
       .map((m) => {
         let text = m.text || "";
+        if (m.image) text = (m.imageSummary ? `[צירפתי תמונה. מה שרואים בה: ${m.imageSummary}]` : "[צירפתי תמונה]") + "\n" + text;
+        if (m.missing && m.missing.length) text += `\nחסר: ${m.missing.map((i) => i.name).join(", ")}`;
         (m.sections || []).forEach((s) => {
           text += `\n${s.title}: ${s.items.map((i) => i.name).join(", ")}`;
         });
@@ -112,12 +130,15 @@
     btn.textContent = inList ? "✓ ברשימה" : "+ הוסף לרשימה";
   }
 
-  function renderSection(section) {
-    const card = make("div", "ai-card");
+  /* missing: the recipe's missing ingredients — one big "add them all" button under the items. */
+  function renderSection(section, { missing = false } = {}) {
+    const card = make("div", missing ? "ai-card missing" : "ai-card");
     const head = make("div", "ai-card-head");
     head.appendChild(make("div", "ai-card-title", section.title));
-    const addAll = make("button", "ai-add-all", "הוסף הכל");
-    head.appendChild(addAll);
+    const addAll = missing
+      ? make("button", "ai-add-all ai-import-btn", `🛒 הוסף ${section.items.length} חסרים לרשימה`)
+      : make("button", "ai-add-all", "הוסף הכל");
+    if (!missing) head.appendChild(addAll);
     card.appendChild(head);
 
     const buttons = [];
@@ -138,6 +159,7 @@
       row.appendChild(btn);
       card.appendChild(row);
     });
+    if (missing) card.appendChild(addAll);
 
     addAll.addEventListener("click", () => {
       const added = section.items.filter((item) => opts.addItem(item)).length;
@@ -157,6 +179,10 @@
     }
     if (m.text) {
       const bubble = make("div", "ai-bubble", m.text);
+      if (m.streaming) {
+        bubble.id = "aiLive";
+        bubble.classList.add("streaming");
+      }
       // Gemini's own words (key/quota/model problems), for whoever has to fix it.
       if (m.detail) {
         const detail = make("div", "ai-error-detail", m.detail);
@@ -165,14 +191,16 @@
       }
       wrap.appendChild(bubble);
     }
+    if (m.missing && m.missing.length) wrap.appendChild(renderSection({ title: "חסר לך למתכון", items: m.missing }, { missing: true }));
     (m.sections || []).forEach((s) => wrap.appendChild(renderSection(s)));
-    if (m.error && m.retryText && index === messages.length - 1) {
+    if (m.error && m.retry && index === messages.length - 1) {
       const retry = make("button", "small-btn", "🔄 נסו שוב");
       retry.addEventListener("click", () => {
         messages.pop(); // the error
+        while (messages.length && messages[messages.length - 1].partial) messages.pop();
         const last = messages[messages.length - 1];
-        if (last && last.role === "user" && last.text === m.retryText) messages.pop();
-        send(m.retryText);
+        if (last && last.role === "user" && last.text === m.retry.text) messages.pop();
+        send(m.retry.text, m.retry.image);
       });
       wrap.appendChild(retry);
     }
@@ -201,7 +229,8 @@
     $.messages.innerHTML = "";
     if (!messages.length && !busy) $.messages.appendChild(renderEmpty());
     messages.forEach((m, i) => $.messages.appendChild(renderMessage(m, i)));
-    if (busy) {
+    const writing = messages.length && messages[messages.length - 1].streaming;
+    if (busy && !writing) {
       // Loading bubble: shown from the moment a question is sent until the answer is rendered.
       const typing = make("div", "ai-msg model ai-loading");
       const bubble = make("div", "ai-bubble ai-typing");
@@ -260,8 +289,9 @@
 
   /* ---------- Talking to the server ---------- */
   let statusText = STATUS.thinking;
+  let baseStatus = STATUS.thinking; // what to show once the server is awake
   function setStatus(text) {
-    statusText = text || STATUS.thinking;
+    statusText = text || baseStatus;
     const label = document.querySelector("#aiTyping .ai-typing-text");
     if (label) label.textContent = statusText;
   }
@@ -280,13 +310,73 @@
     }
   }
 
+  /* A JSON error body from the server (or an SSE `error` event) -> { code, message?, detail? }. */
+  function serverError(body, status) {
+    if (body.code === "AI_FAILED") return { code: body.reason || "default", detail: body.detail };
+    return {
+      code: body.code || (status === 401 ? "INVALID_TOKEN" : status === 429 ? "RATE_LIMITED" : "default"),
+      message: body.message,
+      detail: body.detail,
+    };
+  }
+
+  /*
+   * Reads the answer stream: `delta` events go to onDelta as they arrive; resolves with the
+   * `done` event's { reply, sections, missing, imageSummary }. Never resolves to a retry:
+   * once the server has started answering, resending would cost a second Gemini call.
+   */
+  async function readStream(res, controller, onDelta) {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let result = null;
+    let idle = null;
+    const arm = () => {
+      clearTimeout(idle);
+      idle = setTimeout(() => controller.abort(), STREAM_IDLE_MS);
+    };
+    try {
+      arm();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        arm();
+        buffer += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const raw = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          let event = "message";
+          let data = "";
+          raw.split("\n").forEach((line) => {
+            if (line.startsWith("event:")) event = line.slice(6).trim();
+            else if (line.startsWith("data:")) data += line.slice(5).trim();
+          });
+          if (!data) continue; // ": ping" comments
+          const payload = JSON.parse(data);
+          if (event === "delta") onDelta(payload.text || "");
+          else if (event === "done") result = payload;
+          else if (event === "error") throw serverError(payload);
+        }
+      }
+    } catch (e) {
+      if (e && e.code) throw e;
+      throw { code: controller.signal.aborted ? "timeout" : "interrupted" };
+    } finally {
+      clearTimeout(idle);
+    }
+    if (!result) throw { code: "interrupted" };
+    return result;
+  }
+
   /*
    * One question, cold-start aware. A sleeping Render instance shows up as a hanging
    * /health, a network error, a proxy 502/503/504 without our JSON, or our own
    * SERVER_UNAVAILABLE while the database connects. All of those mean "wait and
    * retry" with a friendly status, never an error, until WAKE_DEADLINE_MS.
+   * `cancel` (an AbortController) stops the question, e.g. on "new chat".
    */
-  async function request(payload) {
+  async function request(payload, onDelta, cancel) {
     const deadline = Date.now() + WAKE_DEADLINE_MS;
     let waking = false;
     const showWaking = () => {
@@ -298,33 +388,41 @@
     const hint = setTimeout(showWaking, WAKE_HINT_AFTER_MS);
     ping(WAKE_DEADLINE_MS).then((up) => {
       clearTimeout(hint);
-      if (up) setStatus(STATUS.thinking);
+      if (up) setStatus(baseStatus);
     });
 
     try {
       for (let attempt = 0; ; attempt++) {
         if (navigator.onLine === false) throw { code: "offline" };
+        if (cancel.signal.aborted) throw { code: "cancelled" };
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+        const stop = () => controller.abort();
+        cancel.signal.addEventListener("abort", stop);
+        const timer = setTimeout(stop, REQUEST_TIMEOUT_MS);
         let res = null;
         let body = {};
         try {
-          res = await fetch(opts.backendUrl + "/api/ai/chat", {
+          res = await fetch(opts.backendUrl + CHAT_PATH, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: "Bearer " + opts.getToken() },
             body: JSON.stringify(payload),
             signal: controller.signal,
           });
+          clearTimeout(timer);
+          if (res.ok && /text\/event-stream/.test(res.headers.get("content-type") || "")) {
+            return await readStream(res, controller, onDelta);
+          }
           body = await res.json().catch(() => ({}));
         } catch (e) {
+          if (e && e.code) throw e; // from readStream
+          if (cancel.signal.aborted) throw { code: "cancelled" };
           // Our own timeout means the server is awake but slow: don't resend the same question.
           if (e && e.name === "AbortError") throw { code: "timeout" };
           res = null; // network error: most likely the server is still booting
         } finally {
           clearTimeout(timer);
+          cancel.signal.removeEventListener("abort", stop);
         }
-
-        if (res && res.ok) return body;
 
         const asleep = !res || (!body.code && [502, 503, 504].includes(res.status)) || body.code === "SERVER_UNAVAILABLE";
         if (asleep) {
@@ -332,64 +430,126 @@
           if (!waking) showWaking();
           await ping(10000); // returns as soon as the server answers
           await sleep(Math.min(1000 * (attempt + 1), 4000));
-          setStatus(STATUS.thinking);
+          setStatus(baseStatus);
           continue;
         }
-        if (body.code === "AI_FAILED") throw { code: body.reason || "default", detail: body.detail };
-        throw {
-          code: body.code || (res.status === 401 ? "INVALID_TOKEN" : res.status === 429 ? "RATE_LIMITED" : "default"),
-          message: body.message,
-          detail: body.detail,
-        };
+        throw serverError(body, res.status);
       }
     } finally {
       clearTimeout(hint);
     }
   }
 
-  async function send(rawText) {
+  /* Streamed text lands in the live bubble directly: re-rendering the chat per chunk would flicker. */
+  let paintQueued = false;
+  function paintLive(message) {
+    if (paintQueued) return;
+    paintQueued = true;
+    requestAnimationFrame(() => {
+      paintQueued = false;
+      const bubble = document.getElementById("aiLive");
+      if (!bubble) return render();
+      bubble.textContent = message.text;
+      if (pinned) scrollToEnd(false);
+    });
+  }
+
+  /*
+   * Asks one question. `image` ({ dataUrl, base64, mimeType } from FridgeVision.prepareImage)
+   * is sent with this question only; the answer's imageSummary stands in for it afterwards.
+   * Returns false when the question couldn't be sent right now.
+   */
+  async function send(rawText, image = null) {
     const text = String(rawText || "").trim();
-    if (!text || busy || sendLocked()) return;
+    if (!text || busy || sendLocked()) return false;
     sendLockedUntil = Date.now() + SEND_COOLDOWN_MS;
     clearTimeout(unlockTimer);
     unlockTimer = setTimeout(() => { $.send.disabled = busy; }, SEND_COOLDOWN_MS);
     if (!opts.getToken()) {
       opts.onNeedAccount();
-      return;
+      return false;
     }
     const history = historyForServer();
     const myConversation = conversation;
-    statusText = STATUS.thinking;
-    messages.push({ role: "user", text });
-    $.input.value = "";
+    baseStatus = image ? STATUS.analyzing : STATUS.thinking;
+    statusText = baseStatus;
+    const question = { role: "user", text, image: image ? image.dataUrl : null };
+    messages.push(question);
+    if (!image) $.input.value = "";
     busy = true;
+    pinned = true;
     render();
     scrollToEnd();
 
-    let reply;
+    const cancel = new AbortController();
+    inFlight = cancel;
+    let live = null; // the answer being written
+    const onDelta = (delta) => {
+      if (!delta || myConversation !== conversation) return;
+      if (!live) {
+        live = { role: "model", text: delta, streaming: true };
+        messages.push(live);
+        render();
+        scrollToEnd(false);
+        return;
+      }
+      live.text += delta;
+      paintLive(live);
+    };
+
     try {
-      const answer = await request({ message: text, history, listItems: opts.getListNames() });
-      reply = { role: "model", text: answer.reply || "", sections: answer.sections || [] };
+      const answer = await request({
+        message: text,
+        history,
+        listItems: opts.getListNames(),
+        ...(image ? { image: { inlineData: { mimeType: image.mimeType, data: image.base64 } } } : {}),
+      }, onDelta, cancel);
+      if (myConversation !== conversation) return true; // the user started a new chat meanwhile
+      if (image && answer.imageSummary) question.imageSummary = answer.imageSummary;
+      const reply = {
+        role: "model",
+        text: answer.reply || (live && live.text) || "",
+        sections: answer.sections || [],
+        missing: answer.missing || [],
+        streaming: false,
+      };
+      if (live) Object.assign(live, reply);
+      else messages.push(reply);
     } catch (e) {
+      if (myConversation !== conversation) return true;
       const code = (e && e.code) || "default";
       const showDetail = ["invalid_key", "forbidden", "AI_QUOTA", "model_not_found", "bad_request"].includes(code);
-      reply = {
+      if (live) Object.assign(live, { streaming: false, partial: true }); // keep what was written
+      messages.push({
         role: "model",
         error: true,
         text: (code === "AI_DISABLED" && e.message ? e.message : ERRORS[code]) || ERRORS.default,
         detail: showDetail && e.detail ? e.detail : null,
-        retryText: NOT_RETRYABLE.has(code) ? null : text,
-      };
+        retry: NOT_RETRYABLE.has(code) ? null : { text, image },
+      });
+    } finally {
+      if (inFlight === cancel) inFlight = null;
     }
-    if (myConversation !== conversation) return; // the user started a new chat meanwhile
-    messages.push(reply);
     busy = false;
     render();
-    scrollToEnd();
+    if (pinned) scrollToEnd();
+    return true;
+  }
+
+  /* A Fridge Vision photo, asked as a question in this chat. */
+  function sendPhoto(image, question) {
+    if (busy) {
+      opts.showToast("רגע, ה-AI עוד עונה על השאלה הקודמת…", 3000);
+      return Promise.resolve(false);
+    }
+    sendLockedUntil = 0; // a photo is a deliberate action, not a double tap
+    return send(question, image);
   }
 
   function newChat() {
     conversation++;
+    if (inFlight) inFlight.abort(); // the server stops the Gemini call too
+    inFlight = null;
     sendLockedUntil = 0;
     messages = [];
     busy = false;
@@ -450,7 +610,6 @@
     $.newChat.addEventListener("click", newChat);
 
     // The on-screen keyboard shrinks the list: stay pinned to the bottom if we were there.
-    let pinned = true;
     $.messages.addEventListener("scroll", () => {
       pinned = $.messages.scrollHeight - $.messages.scrollTop - $.messages.clientHeight < 40;
     }, { passive: true });
@@ -469,6 +628,7 @@
 
   root.AIChat = {
     init,
+    sendPhoto: (image, question) => (opts ? sendPhoto(image, question) : Promise.resolve(false)),
     postLocal: (...m) => opts && postLocal(...m),
     render: () => opts && render(),
     refreshAddButtons: () => opts && refreshAddButtons(),

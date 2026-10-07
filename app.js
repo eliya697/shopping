@@ -2682,22 +2682,16 @@
     input.value = ""; // picking the same photo again must fire "change" again
     closeSheet($.fridgeOverlay);
     if (!file) return;
+    let image;
     try {
-      const result = await window.FridgeVision.analyzeFridgeImage(file, {
-        listItems: items.filter((i) => !i.bought).map((i) => i.name),
-      });
-      AIChat.postLocal(
-        { role: "user", text: "📸 מה חסר לי במקרר?", image: result.image.dataUrl },
-        {
-          role: "model",
-          text: result.ready
-            ? "מנתח את התמונה…"
-            : "התמונה מוכנה לניתוח ✓\nזיהוי אוטומטי של מצרכים חסרים מהמקרר יופעל בקרוב. בינתיים אפשר לכתוב לי מה רואים במקרר ואציע מה לקנות.",
-        },
-      );
+      image = await window.FridgeVision.prepareImage(file);
     } catch (e) {
       showToast("לא הצלחנו לקרוא את התמונה. נסו תמונה אחרת.", 3500);
+      return;
     }
+    // The answer streams into the AI Chef chat, so show it there.
+    switchTab("ai");
+    AIChat.sendPhoto(image, window.FridgeVision.QUESTION);
   }
 
   $.fridgeBtn.addEventListener("click", openFridgeVision);
