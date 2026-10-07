@@ -23,10 +23,11 @@
   };
 
   const PROMPTS = [
-    "מה בעונה עכשיו? 🍓",
-    "3 רעיונות לארוחת ערב מהירה 🍔",
+    "3 רעיונות לארוחת ערב",
+    "מה בעונה עכשיו?",
     "מה לקנות בתקציב נמוך 💰",
-    "מזונות עשירים בחלבון לקנייה 🦾",
+    "מזונות עשירים בחלבון 🦾",
+    "ארוחת שבת לשישה 🕯️",
   ];
 
   // Keys: the server's `code`, or for AI_FAILED its `reason`.
@@ -59,7 +60,9 @@
 
   let opts = null;
   let $ = {};
-  let messages = []; // { role: "user" | "model", text, sections?, error?: true, detail?, retryText? }
+  // { role: "user" | "model", text, sections?, image?, local?: true, error?: true, detail?, retryText? }
+  // `local` messages (e.g. a Fridge Vision photo) are shown but never sent as history.
+  let messages = [];
   let busy = false;
   let voice = null;
   let conversation = 0; // bumped by "new chat"; answers to an older conversation are dropped
@@ -77,7 +80,7 @@
   /* What the model said before, compacted: its text plus the product names it suggested. */
   function historyForServer() {
     return messages
-      .filter((m) => !m.error)
+      .filter((m) => !m.error && !m.local)
       .slice(-HISTORY_TURNS)
       .map((m) => {
         let text = m.text || "";
@@ -146,6 +149,12 @@
 
   function renderMessage(m, index) {
     const wrap = make("div", `ai-msg ${m.error ? "error" : m.role}`);
+    if (m.image) {
+      const img = make("img", "ai-image");
+      img.src = m.image;
+      img.alt = "תמונה ששלחתם";
+      wrap.appendChild(img);
+    }
     if (m.text) {
       const bubble = make("div", "ai-bubble", m.text);
       // Gemini's own words (key/quota/model problems), for whoever has to fix it.
@@ -170,14 +179,12 @@
     return wrap;
   }
 
-  /* Fresh chat: nothing but the suggestions. */
+  /* Fresh chat: a greeting; the suggestion chips sit in the input dock. */
   function renderEmpty() {
     const wrap = make("div", "ai-empty");
-    wrap.appendChild(make("div", "ai-empty-icon", "✦"));
-    wrap.appendChild(make("div", "ai-empty-title", "במה אפשר לעזור?"));
-    const grid = make("div", "ai-empty-prompts");
-    promptButtons("ai-prompt-card").forEach((card) => grid.appendChild(card));
-    wrap.appendChild(grid);
+    wrap.appendChild(make("div", "ai-empty-icon", "👨‍🍳"));
+    wrap.appendChild(make("div", "ai-empty-title", "מה מבשלים היום?"));
+    wrap.appendChild(make("div", "ai-empty-text", "שאלו על ארוחות ומתכונים, בחרו הצעה למטה, או צלמו את המקרר 📸 ונגלה מה חסר."));
     return wrap;
   }
 
@@ -186,7 +193,7 @@
     $.gate.classList.toggle("hidden", signedIn);
     $.messages.classList.toggle("hidden", !signedIn);
     $.bar.classList.toggle("hidden", !signedIn);
-    $.chips.classList.toggle("hidden", !signedIn || !messages.length);
+    $.chips.classList.toggle("hidden", !signedIn);
     $.newChat.classList.toggle("hidden", !signedIn);
     $.newChat.disabled = !messages.length && !busy;
     if (!signedIn) return;
@@ -393,10 +400,13 @@
     $.messages.scrollTop = 0;
   }
 
+  /* Web Speech API. Without it the mic stays visible and explains why it can't listen. */
   function setupVoice() {
     const VoiceInput = root.VoiceInput;
-    if (!VoiceInput || !VoiceInput.supported) return;
-    $.mic.classList.remove("hidden");
+    if (!VoiceInput || !VoiceInput.supported) {
+      $.mic.addEventListener("click", () => opts.showToast("שאלה בקול לא נתמכת בדפדפן הזה — נסו Chrome", 3500));
+      return;
+    }
     voice = new VoiceInput({
       lang: "he-IL",
       onStart: () => {
@@ -450,8 +460,16 @@
     render();
   }
 
+  /* Shows messages produced on this device (e.g. Fridge Vision) without asking the server. */
+  function postLocal(...newMessages) {
+    newMessages.forEach((m) => messages.push({ ...m, local: true }));
+    render();
+    scrollToEnd();
+  }
+
   root.AIChat = {
     init,
+    postLocal: (...m) => opts && postLocal(...m),
     render: () => opts && render(),
     refreshAddButtons: () => opts && refreshAddButtons(),
     onShow: () => {

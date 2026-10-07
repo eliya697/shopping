@@ -24,12 +24,12 @@ const FILES = [
   "quick-add.js",
   "voice.js",
   "ai-chat.js",
+  "fridge-vision.js",
   "socket-client.js",
   "pwa-update.js",
   "sw.js",
   "app.js",
   "vendor/socket.io.min.js",
-  "vendor/qrcode.js",
 ];
 
 fs.rmSync(OUT, { recursive: true, force: true });

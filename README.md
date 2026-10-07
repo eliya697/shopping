@@ -16,7 +16,7 @@ An offline-first shopping list (Hebrew, RTL, dark Listonic-style UI) with multip
 | **Checked items drawer** | Checked items collapse into a *פריטים שסומנו (n)* drawer at the bottom of the list, with a 🧹 clear button. A search always shows its checked matches. |
 | **Multiple lists** | Create lists (“קניות שבועיות”, “בית מרקחת”, “ארוחת שבת”…), switch from the title in the header, rename or delete them. |
 | **Sharing** | One tap opens the phone's share sheet (`navigator.share`, or the native sheet in the Android app), with **WhatsApp**, **SMS** and **copy link** buttons as fallbacks. The link (`…/join/?code=ABCD2345`) joins the list automatically. Someone without an account gets one created on the spot (named *אורח/ת*, and the app prompts them to set their name), so joining takes no typing. Members, joins, renames and deletions sync live. |
-| **Device pairing** | Profile → *חיבור מכשיר נוסף* shows a one-time **6-digit code** and a **QR code** (valid 5 minutes). Scan it with the new phone's camera, or type the digits under *יש לי חשבון במכשיר אחר*. No IDs or tokens are ever shown in the UI. |
+| **Device pairing** | Profile → *חיבור מכשיר נוסף* shows a one-time **6-digit code** (valid 5 minutes). Type the digits on the new phone under *יש לי חשבון במכשיר אחר*. No IDs or tokens are ever shown in the UI. |
 | **Quantity & notes** | Free-text quantity (“3”, “1 ק״ג”, “2 חבילות”) and notes (“אורגני בלבד”). Tap an item to edit. The row shows a small quantity pill and a one-line note. |
 | **Smart categories** | 11 supermarket sections, auto-detected from the name. The head noun wins (“מיץ תפוזים” → drinks), and corrections you make are remembered. |
 | **Store layout** | 🧭 toggle groups the list by aisle along a walking path: produce first, chilled and frozen last so they stay cold. ⚙️ reorders the aisles for your store. |
@@ -31,7 +31,7 @@ Typed input understands quantities too: `2 חלב`, `חלב x2`, `חצי קיל�
 ```
 shop app/
 ├── index.html              # UI: Lists / AI / Profile tabs, bottom nav, sheets, update banner
-├── style.css               # dark (default) + light theme tokens
+├── style.css               # glassmorphism design system: dark (default) + light tokens
 ├── app.js                  # state, rendering (keyed DOM patching), actions, sync wiring, tabs
 ├── ai-chat.js              # AI assistant tab: chat UI, cold-start-aware /api/ai/chat client, "add to list" cards
 ├── join/index.html         # invite deep link (…/join/?code=X) -> app with ?join=X
@@ -45,7 +45,7 @@ shop app/
 ├── config.js               # BACKEND_URL
 ├── admin.html / admin.js   # hidden admin dashboard (developer only)
 ├── vendor/socket.io.min.js # Socket.io client (same-origin, so it works offline)
-├── vendor/qrcode.js        # QR generator for device pairing (qrcode-generator, MIT)
+├── fridge-vision.js        # AI Fridge Vision: camera/gallery photo -> Gemini-ready payload (stub)
 ├── tests/parser.test.js    # categorizer + parser tests:  node tests/parser.test.js
 ├── .github/workflows/deploy.yml  # Pages deploy; stamps a new version into sw.js
 ├── render.yaml             # Render blueprint for the backend
@@ -84,7 +84,7 @@ The server stores only a SHA-256 hash of the token.
 | `POST /api/pair/start` *(Bearer token)* | `{ code: "123456", expiresAt, ttlMs }`. A new code replaces the account's previous one. |
 | `POST /api/pair/redeem { code }` | `{ token, user, lists }`, or 404 `INVALID_CODE` |
 
-Because the database only has the token's hash, the code carries the signed-in device's token **in server memory**. Codes are single use, expire after 5 minutes, and vanish on a restart. Wrong guesses are limited to 8 per IP and 60 in total per 10 minutes, so the million-code space can't be swept within a code's lifetime. The QR code encodes `…/?pair=123456`: opening it on a device without an account signs it in automatically, and on a device that's already signed in it does nothing.
+Because the database only has the token's hash, the code carries the signed-in device's token **in server memory**. Codes are single use, expire after 5 minutes, and vanish on a restart. Wrong guesses are limited to 8 per IP and 60 in total per 10 minutes, so the million-code space can't be swept within a code's lifetime. A `…/?pair=123456` link still works: opening it on a device without an account signs it in automatically, and on a device that's already signed in it does nothing.
 
 ### Invite deep links
 

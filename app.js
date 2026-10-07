@@ -12,7 +12,8 @@
     listCachePrefix: "shoppingList.listCache.v1.", // + listId -> { list, items }
     checkedOpen: "shoppingList.checkedOpen.v1",
     welcomeSeen: "shoppingList.welcomeSeen.v1",
-    viewMode: "shoppingList.viewMode.v1",
+    viewMode: "shoppingList.viewMode.v2", // v2: aisle routing is the default
+    notify: "shoppingList.notify.v1",
     storeOrder: "shoppingList.storeOrder.v1",
     learnedCategories: "shoppingList.learnedCategories.v1",
     pendingJoin: "shoppingList.pendingJoin.v1",
@@ -67,7 +68,7 @@
   let templates = {};
   let activeFilter = "all";
   let searchQuery = "";
-  let viewMode = "list"; // "list" | "store"
+  let viewMode = "store"; // "store" (grouped by supermarket aisle) | "list"
   let storeOrder = Categories.DEFAULT_STORE_ORDER.slice();
 
   let account = null; // { userId, username, token }
@@ -112,7 +113,7 @@
 
   function loadState() {
     templates = readJSON(STORAGE_KEYS.templates, null) || { ...DEFAULT_TEMPLATE };
-    viewMode = readJSON(STORAGE_KEYS.viewMode, "list") === "store" ? "store" : "list";
+    viewMode = readJSON(STORAGE_KEYS.viewMode, "store") === "list" ? "list" : "store";
     storeOrder = Categories.sanitizeOrder(readJSON(STORAGE_KEYS.storeOrder, null) || Categories.DEFAULT_STORE_ORDER);
     Categories.learned = readJSON(STORAGE_KEYS.learnedCategories, {});
 
@@ -158,15 +159,19 @@
     "listContainer", "emptyState", "subtitle", "filterRow", "searchInput",
     "clearSearchBtn", "newItemInput", "addBtn", "resetAllBtn",
     "templatesBtn", "templatesOverlay", "closeTemplatesBtn", "templateNameInput", "saveTemplateBtn",
-    "templatesList", "confirmOverlay", "confirmMessage", "confirmOkBtn", "confirmCancelBtn", "toast",
-    "toastText", "toastAction",
-    // header & account row
-    "appTitle", "listSwitcherBtn", "listTitle", "connPill", "syncDot", "connText", "accountRow",
-    "enableSyncBtn", "membersBtn", "membersText", "syncBar",
+    "templatesList", "confirmOverlay", "confirmMessage", "confirmOkBtn", "confirmCancelBtn", "toastStack",
+    // header
+    "appTitle", "listSwitcherBtn", "listTitle", "connPill", "syncDot", "connText",
+    "membersBtn", "membersText", "syncBar", "togetherBtn",
     // tabs & profile
     "bottomNav", "profileGuestSection", "profileSyncBtn", "profileAccountSection", "profileSyncSection",
     "syncDetailText", "syncNowBtn", "profileListsBtn", "profileTemplatesBtn", "profileOrderBtn", "deviceSection",
-    "appVersion",
+    "appVersion", "premiumBtn", "notifySwitch", "notifySub", "themeSwitch",
+    // share fallback
+    "shareFallbackOverlay", "closeShareFallbackBtn", "shareWhatsappLink", "shareSmsLink",
+    // fridge vision
+    "fridgeBtn", "fridgeOverlay", "closeFridgeBtn", "fridgeCameraBtn", "fridgeUploadBtn",
+    "fridgeCameraInput", "fridgeUploadInput",
     // layout
     "layoutToggleBtn", "orderBtn", "orderOverlay", "closeOrderBtn", "orderList", "resetOrderBtn",
     // add bar
@@ -181,11 +186,10 @@
     "itemNotesInput", "categoryGrid", "itemMeta", "deleteItemBtn", "saveItemBtn",
     // share / account sheet
     "accountOverlay", "accountTitle", "closeAccountBtn", "listSettingsSection", "listNameInput",
-    "saveListNameBtn", "inviteStatus", "shareLinkBtn", "shareWhatsappBtn", "shareSmsBtn", "copyLinkBtn",
-    "regenCodeBtn", "membersTitle", "membersList", "sharedWithMeSection", "sharedByText",
+    "saveListNameBtn", "regenCodeBtn", "membersTitle", "membersList", "sharedWithMeSection", "sharedByText",
     "leaveListBtn", "deleteListSection", "deleteListBtn", "usernameInput", "saveUsernameBtn", "syncStatusText",
     // profile & device pairing
-    "profileAvatar", "profilePairBtn", "pairDeviceBtn", "pairOverlay", "closePairBtn", "pairQr", "pairCode",
+    "profileAvatar", "profilePairBtn", "pairDeviceBtn", "pairOverlay", "closePairBtn", "pairCode",
     "pairTimer", "pairRefreshBtn",
     "logoutBtn",
     // welcome
@@ -204,31 +208,60 @@
   }
   const isOpen = (overlay) => !overlay.classList.contains("hidden");
 
-  /* ---------- Toast ---------- */
-  let toastTimer = null;
-  let toastActionFn = null;
-  function showToast(msg, ms = 2200, action = null) {
-    $.toastText.textContent = msg;
-    toastActionFn = action ? action.fn : null;
-    $.toastAction.textContent = action ? action.label : "";
-    $.toastAction.classList.toggle("hidden", !action);
-    $.toast.classList.remove("hidden");
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => $.toast.classList.add("hidden"), ms);
-  }
-  $.toastAction.addEventListener("click", () => {
-    const fn = toastActionFn;
-    $.toast.classList.add("hidden");
-    if (fn) fn();
-  });
+  /* ---------- Toasts (glass, stacked) ----------
+   * Each toast has a key: showing a toast with a key that's already on screen
+   * replaces it. Status messages share the "main" key (one at a time, like
+   * before); remote-activity notices get their own keys and stack above it.
+   */
+  const MAX_TOASTS = 3;
+  const toasts = new Map(); // key -> { node, timer }
 
-  async function copyText(text, okMsg) {
-    try {
-      await navigator.clipboard.writeText(text);
-      showToast(okMsg);
-    } catch (e) {
-      showToast("ההעתקה נכשלה — סמנו והעתיקו ידנית");
+  function dismissToast(key) {
+    const t = toasts.get(key);
+    if (!t) return;
+    toasts.delete(key);
+    clearTimeout(t.timer);
+    t.node.classList.add("leaving");
+    setTimeout(() => t.node.remove(), 220);
+  }
+
+  function toast({ key = "main", text, icon = "", ms = 2200, action = null, remote = false }) {
+    const old = toasts.get(key);
+    if (old) {
+      toasts.delete(key);
+      clearTimeout(old.timer);
+      old.node.remove();
     }
+    const node = document.createElement("div");
+    node.className = "toast" + (remote ? " remote" : "");
+    node.setAttribute("role", "status");
+    if (icon) {
+      const i = document.createElement("span");
+      i.className = "toast-icon";
+      i.textContent = icon;
+      node.appendChild(i);
+    }
+    const t = document.createElement("span");
+    t.className = "toast-text";
+    t.textContent = text;
+    node.appendChild(t);
+    if (action) {
+      const btn = document.createElement("button");
+      btn.className = "toast-action";
+      btn.textContent = action.label;
+      btn.addEventListener("click", () => {
+        dismissToast(key);
+        action.fn();
+      });
+      node.appendChild(btn);
+    }
+    $.toastStack.prepend(node); // column-reverse: newest sits closest to the input dock
+    toasts.set(key, { node, timer: setTimeout(() => dismissToast(key), ms) });
+    while (toasts.size > MAX_TOASTS) dismissToast(toasts.keys().next().value);
+  }
+
+  function showToast(msg, ms = 2200, action = null) {
+    toast({ text: msg, ms, action });
   }
 
   /* ---------- Confirm modal ---------- */
@@ -251,24 +284,91 @@
   $.confirmOverlay.addEventListener("click", (e) => { if (e.target === $.confirmOverlay) hideConfirm(); });
 
   /* ---------- Theme (dark by default; light is opt-in from the Profile tab) ---------- */
-  const THEME_BAR_COLOR = { dark: "#121212", light: "#f4f6f4" };
-  const themeButtons = document.querySelectorAll("[data-theme-choice]");
+  const THEME_BAR_COLOR = { dark: "#0f172a", light: "#eef2f9" };
 
   function applyTheme(theme) {
     document.documentElement.setAttribute("data-theme", theme);
     const metaTheme = document.querySelector('meta[name="theme-color"]');
     if (metaTheme) metaTheme.setAttribute("content", THEME_BAR_COLOR[theme]);
-    themeButtons.forEach((b) => {
-      const on = b.dataset.themeChoice === theme;
-      b.classList.toggle("active", on);
-      b.setAttribute("aria-checked", String(on));
-    });
+    $.themeSwitch.checked = theme === "dark";
     Native.setStatusBar(theme);
   }
-  themeButtons.forEach((b) => b.addEventListener("click", () => {
-    applyTheme(b.dataset.themeChoice);
-    try { localStorage.setItem(STORAGE_KEYS.theme, b.dataset.themeChoice); } catch (e) {}
-  }));
+  $.themeSwitch.addEventListener("change", () => {
+    const theme = $.themeSwitch.checked ? "dark" : "light";
+    applyTheme(theme);
+    try { localStorage.setItem(STORAGE_KEYS.theme, theme); } catch (e) {}
+  });
+
+  /* ---------- Notifications ----------
+   * In-app: a glass toast when someone else changes a shared list.
+   * In the background (tab hidden), if the user switched notifications on in
+   * Profile: a system notification through the service worker (sw.js also
+   * handles real Web Push events, so a server can send them later).
+   */
+  const notifySupported = "Notification" in window && "serviceWorker" in navigator && !Native.isApp;
+  let notifyEnabled = readJSON(STORAGE_KEYS.notify, false) === true;
+
+  function notificationsOn() {
+    return notifySupported && notifyEnabled && Notification.permission === "granted";
+  }
+
+  function renderNotifySetting() {
+    $.notifySwitch.checked = notificationsOn();
+    $.notifySwitch.disabled = !notifySupported || Notification.permission === "denied";
+    $.notifySub.textContent = !notifySupported
+      ? "לא נתמך במכשיר הזה — ההתראות יופיעו בתוך האפליקציה"
+      : Notification.permission === "denied"
+        ? "ההתראות חסומות. אפשרו אותן בהגדרות הדפדפן"
+        : "כשמישהו מוסיף פריט לרשימה משותפת";
+  }
+
+  async function setNotifications(on) {
+    if (on && notifySupported && Notification.permission !== "granted") {
+      try { await Notification.requestPermission(); } catch (e) {}
+    }
+    notifyEnabled = on && notifySupported && Notification.permission === "granted";
+    writeJSON(STORAGE_KEYS.notify, notifyEnabled);
+    renderNotifySetting();
+    if (on && !notifyEnabled) showToast("לא התקבלה הרשאה להתראות", 3000);
+    else if (notifyEnabled) toast({ text: "התראות הופעלו", icon: "🔔" });
+  }
+  $.notifySwitch.addEventListener("change", () => setNotifications($.notifySwitch.checked));
+
+  /* Someone else changed the list: toast now, system notification when the app is in the background. */
+  function notifyActivity(text, icon = "🛒") {
+    toast({ key: "remote:" + text, text, icon, ms: 4000, remote: true });
+    if (!document.hidden || !notificationsOn()) return;
+    navigator.serviceWorker.ready
+      .then((reg) => reg.showNotification(activeListName(), {
+        body: text,
+        icon: "icon.svg",
+        badge: "icon.svg",
+        tag: "list-" + (activeListId || "local"),
+        renotify: true,
+        dir: "rtl",
+        lang: "he",
+        data: { url: location.pathname },
+      }))
+      .catch(() => {});
+  }
+
+  /* Remote adds arrive one event per item; a burst (a template, an AI "add all") becomes one notice. */
+  let remoteAdds = [];
+  let remoteAddTimer = null;
+  function queueRemoteAdd(item) {
+    remoteAdds.push(item);
+    clearTimeout(remoteAddTimer);
+    remoteAddTimer = setTimeout(() => {
+      const batch = remoteAdds;
+      remoteAdds = [];
+      const who = memberName(batch[0].addedBy) || "משתמש אחר";
+      if (batch.length === 1) {
+        notifyActivity(`${who} הוסיף/ה "${batch[0].name}" לרשימה`, Categories.emojiFor(batch[0].name, batch[0].category));
+      } else {
+        notifyActivity(`${who} הוסיף/ה ${batch.length} פריטים לרשימה`);
+      }
+    }, 600);
+  }
 
   /* ---------- Operations ----------
    * Every change — a local tap or a socket event — is an "op" applied by
@@ -387,14 +487,37 @@
   const rowRefs = new Map(); // item id -> { row, content, circle, nameEl, qtyEl, metaEl }
   const headerEls = new Map(); // section key -> element
 
-  function sectionHeader(key, text) {
+  /* Smart aisle routing: one header per supermarket aisle, numbered in walking order. */
+  function aisleHeader(key, step, count) {
     let h = headerEls.get(key);
     if (!h) {
+      const c = Categories.get(key);
       h = document.createElement("div");
-      h.className = "section-label";
+      h.className = "aisle-header";
+      const emoji = document.createElement("span");
+      emoji.className = "aisle-emoji";
+      emoji.setAttribute("aria-hidden", "true");
+      emoji.textContent = c.emoji;
+      const text = document.createElement("div");
+      text.className = "aisle-text";
+      const title = document.createElement("span");
+      title.className = "aisle-title";
+      title.textContent = c.label;
+      const stepEl = document.createElement("span");
+      stepEl.className = "aisle-step";
+      text.appendChild(title);
+      text.appendChild(stepEl);
+      const line = document.createElement("span");
+      line.className = "aisle-line";
+      const countEl = document.createElement("span");
+      countEl.className = "aisle-count";
+      h.append(emoji, text, line, countEl);
+      h.refs = { stepEl, countEl };
       headerEls.set(key, h);
     }
-    if (h.textContent !== text) h.textContent = text;
+    const stepText = `מעבר ${step}`;
+    if (h.refs.stepEl.textContent !== stepText) h.refs.stepEl.textContent = stepText;
+    if (h.refs.countEl.textContent !== String(count)) h.refs.countEl.textContent = count;
     return h;
   }
 
@@ -462,11 +585,11 @@
         if (!byCat.has(i.category)) byCat.set(i.category, []);
         byCat.get(i.category).push(i);
       });
+      let step = 0;
       storeOrder.forEach((key) => {
         const group = byCat.get(key);
         if (!group) return;
-        const c = Categories.get(key);
-        nodes.push(sectionHeader("cat:" + key, `${c.emoji} ${c.label} · ${group.length}`));
+        nodes.push(aisleHeader(key, ++step, group.length));
         group.forEach((i) => nodes.push(upsertRow(i).row));
       });
     } else {
@@ -568,9 +691,11 @@
     const shared = listInfo && listInfo.members.length > 1;
     const adder = shared && item.addedBy && account && item.addedBy !== account.userId ? memberName(item.addedBy) : null;
 
-    ref.circle.classList.toggle("checked", !!item.bought);
-    ref.row.classList.toggle("is-bought", !!item.bought);
-    ref.nameEl.classList.toggle("bought", !!item.bought);
+    // A row being checked off shows as bought during its short celebration, before it moves.
+    const bought = !!item.bought || pendingChecks.has(item.id);
+    ref.circle.classList.toggle("checked", bought);
+    ref.row.classList.toggle("is-bought", bought);
+    ref.nameEl.classList.toggle("bought", bought);
     const emojiKey = item.name + "|" + item.category;
     if (ref.emojiKey !== emojiKey) {
       ref.emojiKey = emojiKey;
@@ -611,7 +736,7 @@
     circle.className = "check-circle";
     circle.textContent = "✓";
     circle.setAttribute("aria-label", "סמן כנקנה");
-    circle.addEventListener("click", () => toggleBought(id));
+    circle.addEventListener("click", () => toggleBought(id, circle));
 
     const emojiEl = document.createElement("span");
     emojiEl.className = "item-emoji";
@@ -670,10 +795,12 @@
       currentX = e.clientX - startX;
       if (currentX > 0) currentX = 0; // only allow leftward drag
       content.style.transform = `translateX(${currentX}px)`;
+      content.parentElement.classList.toggle("swiping", currentX < -4);
     }
     function onUp() {
       if (!dragging) return;
       dragging = false;
+      setTimeout(() => content.parentElement && content.parentElement.classList.remove("swiping"), 180);
       content.style.transition = "transform 0.18s ease";
       if (Math.abs(currentX) > 6) swipedAt = Date.now(); // a drag, not a tap
       if (Math.abs(currentX) > threshold) {
@@ -776,9 +903,70 @@
     }
   }
 
-  function toggleBought(id) {
+  /* ---------- Check-off micro-interaction: pop, confetti, strikethrough, haptics ---------- */
+  const CHECK_SETTLE_MS = 480; // time to enjoy the animation before the row moves to "bought"
+  const pendingChecks = new Map(); // item id -> timer
+  const CONFETTI_COLORS = ["#00e676", "#69f0ae", "#a855f7", "#7c3aed", "#38bdf8", "#facc15"];
+  const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function burstConfetti(anchor) {
+    if (reduceMotion || !anchor) return;
+    const r = anchor.getBoundingClientRect();
+    const burst = document.createElement("div");
+    burst.className = "confetti-burst";
+    burst.style.left = `${r.left + r.width / 2}px`;
+    burst.style.top = `${r.top + r.height / 2}px`;
+    for (let i = 0; i < 16; i++) {
+      const angle = (Math.PI * 2 * i) / 16 + Math.random() * 0.4;
+      const dist = 26 + Math.random() * 30;
+      const p = document.createElement("span");
+      p.className = "confetti-piece" + (i % 3 === 0 ? " round" : "");
+      p.style.setProperty("--c", CONFETTI_COLORS[i % CONFETTI_COLORS.length]);
+      p.style.setProperty("--dx", `${Math.cos(angle) * dist}px`);
+      p.style.setProperty("--dy", `${Math.sin(angle) * dist + 10}px`); // a little gravity
+      p.style.setProperty("--rot", `${Math.round(Math.random() * 540 - 270)}deg`);
+      p.style.animationDelay = `${Math.random() * 40}ms`;
+      burst.appendChild(p);
+    }
+    document.body.appendChild(burst);
+    setTimeout(() => burst.remove(), 900);
+  }
+
+  function haptic(pattern = [30]) {
+    try { if (navigator.vibrate) navigator.vibrate(pattern); } catch (e) {}
+  }
+
+  function toggleBought(id, circle) {
     const item = items.find((i) => i.id === id);
-    if (item) commit({ type: "toggle", id, bought: !item.bought });
+    if (!item) return;
+
+    // Tapped again while still celebrating: cancel the check-off.
+    if (pendingChecks.has(id)) {
+      clearTimeout(pendingChecks.get(id));
+      pendingChecks.delete(id);
+      upsertRow(item);
+      return;
+    }
+    if (item.bought) {
+      commit({ type: "toggle", id, bought: false });
+      return;
+    }
+
+    pendingChecks.set(id, setTimeout(() => {
+      pendingChecks.delete(id);
+      const current = items.find((i) => i.id === id);
+      if (current && !current.bought) commit({ type: "toggle", id, bought: true });
+      else render();
+    }, CHECK_SETTLE_MS));
+    upsertRow(item); // strikethrough + dim right away
+    if (circle) {
+      circle.classList.remove("pop");
+      void circle.offsetWidth; // restart the animation
+      circle.classList.add("pop");
+      setTimeout(() => circle.classList.remove("pop"), 520);
+    }
+    burstConfetti(circle);
+    haptic([30]);
   }
 
   function deleteItem(id) {
@@ -1249,13 +1437,12 @@
 
   /* ---------- Header ---------- */
   function renderAccountUI() {
-    $.accountRow.classList.toggle("hidden", !BACKEND_URL);
     $.appTitle.classList.toggle("hidden", !!account);
     $.listSwitcherBtn.classList.toggle("hidden", !account);
     $.connPill.classList.toggle("hidden", !account);
+    $.togetherBtn.classList.toggle("hidden", !BACKEND_URL);
     if (!BACKEND_URL) return;
 
-    $.enableSyncBtn.classList.toggle("hidden", !!account);
     $.membersBtn.classList.toggle("hidden", !account);
     renderProfile();
     if (aiSignedIn !== !!account) {
@@ -1278,7 +1465,11 @@
     } else if (memberCount > 1) {
       $.membersText.textContent = `משותף עם ${memberCount - 1}`;
     } else {
-      $.membersText.textContent = "שיתוף";
+      $.membersText.textContent = "רק את/ה";
+    }
+    if (syncStatus === "online" && !invitePrefetched.has(activeListId)) {
+      invitePrefetched.add(activeListId);
+      prefetchInviteCode();
     }
 
     if (isOpen($.accountOverlay)) renderAccountModal();
@@ -1341,23 +1532,39 @@
     $.saveUsernameBtn.classList.toggle("hidden", !account || !typed || typed === account.username);
   }
 
-  /* ---------- Bottom navigation ---------- */
+  /* ---------- Floating dock navigation ---------- */
   const tabPanels = document.querySelectorAll(".tab-panel");
-  const navButtons = $.bottomNav.querySelectorAll(".nav-btn");
+  const navButtons = Array.from($.bottomNav.querySelectorAll(".nav-btn"));
+  const tabOrder = navButtons.map((b) => b.dataset.tab);
+  const navIndicator = $.bottomNav.querySelector(".nav-indicator");
 
   function switchTab(tab) {
     if (tab === activeTab) {
       window.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
+    // Slide in from the side of the tab we're moving toward (RTL: later tabs are to the left).
+    const forward = tabOrder.indexOf(tab) > tabOrder.indexOf(activeTab);
     activeTab = tab;
-    tabPanels.forEach((panel) => panel.classList.toggle("hidden", panel.dataset.tab !== tab));
+    document.body.dataset.tab = tab;
+    tabPanels.forEach((panel) => {
+      const on = panel.dataset.tab === tab;
+      panel.classList.toggle("hidden", !on);
+      panel.classList.remove("view-enter");
+      if (on) {
+        panel.style.setProperty("--enter-x", forward ? "-28px" : "28px");
+        void panel.offsetWidth; // restart the animation
+        panel.classList.add("view-enter");
+      }
+    });
     navButtons.forEach((b) => {
       const on = b.dataset.tab === tab;
       b.classList.toggle("active", on);
       if (on) b.setAttribute("aria-current", "page");
       else b.removeAttribute("aria-current");
     });
+    navIndicator.style.setProperty("--i", tabOrder.indexOf(tab));
+    haptic([8]);
     window.scrollTo(0, 0);
     if (tab === "lists") render();
     if (tab === "ai") AIChat.onShow();
@@ -1463,56 +1670,56 @@
     return true;
   }
 
-  /* ---------- Share sheet: native share, WhatsApp, SMS, copy ---------- */
-  let inviteCode = null;
-  let inviteLoading = false;
+  /* ---------- "צור רשימה ביחד": one button, native share ----------
+   * The invite code is fetched ahead of time (prefetchInviteCode) so that the tap
+   * can open the share sheet immediately: browsers only allow navigator.share()
+   * shortly after a user gesture.
+   */
+  const inviteCodes = new Map(); // listId -> code
+  const invitePrefetched = new Set(); // lists we already tried to prefetch a code for
+  let invitePending = null; // in-flight request promise
 
   // The app's folder URL ("…/shopping/"). Inside the Android app the page lives on
   // https://localhost, so links point at the public web app instead.
   const appBaseUrl = () => (Native.isApp && PUBLIC_URL ? PUBLIC_URL : location.origin + location.pathname.replace(/[^/]*$/, ""));
   // Deep link: join/index.html (and the service worker) forward it to ?join=CODE, which joins automatically.
   const inviteLink = (code) => `${appBaseUrl()}join/?code=${encodeURIComponent(code)}`;
-  const inviteText = () => `הצטרפו לרשימת הקניות "${activeListName()}" 🛒`;
-
-  function renderInviteState() {
-    const ready = !!inviteCode;
-    [$.shareLinkBtn, $.shareWhatsappBtn, $.shareSmsBtn, $.copyLinkBtn].forEach((b) => { b.disabled = !ready; });
-    $.regenCodeBtn.disabled = !ready;
-    $.inviteStatus.textContent = ready
-      ? "מי שיפתח את הקישור יצטרף לרשימה מיד, בלי להקליד כלום."
-      : inviteLoading
-        ? (syncStatus === "online" ? "מכין קישור הזמנה…" : "השרת מתעורר, מיד מתחברים…")
-        : "כדי ליצור קישור הזמנה צריך חיבור לשרת. ננסה שוב ברגע שנתחבר.";
-  }
+  const inviteText = () => `בואו נעשה קניות ביחד! הצטרפו לרשימה "${activeListName()}" 🛒`;
 
   async function loadInviteCode(regenerate = false) {
+    if (!sync || !activeListId) return null;
     const listId = activeListId;
-    inviteLoading = true;
-    renderInviteState();
     const res = await sync.request("list:share_code", { listId, regenerate });
-    inviteLoading = false;
-    if (listId !== activeListId) return;
-    if (res.ok) inviteCode = res.code;
-    else if (regenerate) needsConnection(res);
-    renderInviteState();
-    if (regenerate && res.ok) showToast("נוצר קישור חדש — הקישור הקודם כבר לא עובד");
+    if (!res.ok) {
+      if (regenerate) needsConnection(res);
+      return null;
+    }
+    inviteCodes.set(listId, res.code);
+    if (regenerate) showToast("נוצר קישור חדש — הקישור הקודם כבר לא עובד");
+    return res.code;
   }
 
-  function openExternal(url) {
-    // In the Android app, Capacitor hands non-app URLs (wa.me, sms:) to the system.
-    if (/^https?:/.test(url) && !Native.isApp) window.open(url, "_blank", "noopener");
-    else location.href = url;
+  function prefetchInviteCode() {
+    if (invitePending || !sync || !activeListId) return invitePending;
+    invitePending = loadInviteCode().finally(() => { invitePending = null; });
+    return invitePending;
   }
 
-  async function shareInviteLink() {
-    if (!inviteCode) return;
-    const url = inviteLink(inviteCode);
+  function openShareFallback(url, text) {
+    const message = `${text}\n${url}`;
+    $.shareWhatsappLink.href = `whatsapp://send?text=${encodeURIComponent(message)}`;
+    // "sms:?&body=" works on both Android and iOS.
+    $.shareSmsLink.href = `sms:?&body=${encodeURIComponent(message)}`;
+    openSheet($.shareFallbackOverlay);
+  }
+
+  async function shareInvite(url) {
     const title = activeListName();
     const text = inviteText();
-    const nativeShare = Native.isApp && Native.plugin("Share");
+    const nativeShare = Native.isApp && Native.plugin("Share"); // the Android app's system share sheet
     try {
       if (nativeShare) {
-        await nativeShare.share({ title, text, url, dialogTitle: "שיתוף הרשימה" });
+        await nativeShare.share({ title, text, url, dialogTitle: "צור רשימה ביחד" });
         return;
       }
       if (navigator.share) {
@@ -1522,19 +1729,40 @@
     } catch (e) {
       const msg = String((e && (e.name + " " + e.message)) || "");
       if (/AbortError|cancel/i.test(msg)) return; // the user closed the share sheet
+      if (/NotAllowedError/i.test(msg)) {
+        // The gesture expired while the code loaded: one more tap shares instantly.
+        showToast("קישור ההזמנה מוכן", 6000, { label: "שיתוף", fn: () => shareInvite(url) });
+        return;
+      }
     }
-    copyText(url, "קישור ההזמנה הועתק — הדביקו אותו בצ'אט");
+    openShareFallback(url, text);
   }
 
-  const shareViaWhatsapp = () => inviteCode && openExternal(`https://wa.me/?text=${encodeURIComponent(`${inviteText()}\n${inviteLink(inviteCode)}`)}`);
-  // "sms:?&body=" works on both Android and iOS.
-  const shareViaSms = () => inviteCode && openExternal(`sms:?&body=${encodeURIComponent(`${inviteText()} ${inviteLink(inviteCode)}`)}`);
-  const copyInviteLink = () => inviteCode && copyText(inviteLink(inviteCode), "קישור ההזמנה הועתק");
+  async function makeListTogether() {
+    if (!BACKEND_URL) return;
+    if (!account) {
+      openWelcome("כדי ליצור רשימה ביחד צריך חשבון (חינם, רק שם). הפריטים שכבר ברשימה יישמרו ויסונכרנו לכולם.");
+      return;
+    }
+    haptic([15]);
+    let code = inviteCodes.get(activeListId);
+    if (!code) {
+      $.togetherBtn.classList.add("loading");
+      if (syncStatus !== "online") showToast("השרת מתעורר, מכינים קישור הזמנה…", 8000);
+      code = await (prefetchInviteCode() || loadInviteCode());
+      $.togetherBtn.classList.remove("loading");
+      if (!code) {
+        showToast("כדי ליצור קישור הזמנה צריך חיבור לשרת. נסו שוב בעוד רגע.", 3500);
+        return;
+      }
+    }
+    shareInvite(inviteLink(code));
+  }
 
   function renderAccountModal() {
     if (!account) return;
     const own = isOwnList();
-    $.accountTitle.textContent = `שיתוף: ${activeListName()}`;
+    $.accountTitle.textContent = activeListName();
 
     $.listSettingsSection.classList.toggle("hidden", !own);
     if (own && document.activeElement !== $.listNameInput) $.listNameInput.value = (listInfo && listInfo.name) || (activeListMeta() || {}).name || "";
@@ -1587,11 +1815,8 @@
   }
 
   function openAccountModal() {
-    inviteCode = null;
-    renderInviteState();
     renderAccountModal();
     openSheet($.accountOverlay);
-    loadInviteCode();
   }
 
   async function saveListName() {
@@ -1753,10 +1978,7 @@
         wakeToastShown = true;
         showToast("השרת מתעורר… הרשימה זמינה ותסתנכרן בעוד רגע", 3500);
       }
-      if (status === "online") {
-        processPendingJoin();
-        if (isOpen($.accountOverlay) && !inviteCode && !inviteLoading) loadInviteCode();
-      }
+      if (status === "online") processPendingJoin();
     });
 
     client.on("queue", (count) => {
@@ -1811,6 +2033,7 @@
       if (isNew && item.addedBy !== account.userId) {
         flashIds.add(item.itemId);
         QuickAdd.record(local, listId);
+        queueRemoteAdd(local);
       }
     }));
     client.on("item:toggled", forActive(({ listId, itemId, isCompleted }) => {
@@ -2033,7 +2256,7 @@
     }
   }
 
-  /* New device: redeem the 6-digit code shown on a signed-in device (typed, or from its QR link). */
+  /* New device: redeem the 6-digit code shown on a signed-in device (typed, or from a ?pair= link). */
   async function linkDevice(codeArg) {
     const code = String(codeArg || $.linkCodeInput.value).replace(/\D/g, "");
     if (code.length !== 6) {
@@ -2085,28 +2308,9 @@
     }
   }
 
-  /* ---------- Pair another device (this device shows the code + QR) ---------- */
+  /* ---------- Pair another device (this device shows a one-time 6-digit code) ---------- */
   let pairTicker = null;
   let pairExpiresAt = 0;
-
-  /* QR as an SVG path; always black on white so every camera can read it, in both themes. */
-  function renderQr(container, text) {
-    if (typeof window.qrcode !== "function") {
-      container.innerHTML = "";
-      return;
-    }
-    const qr = window.qrcode(0, "M");
-    qr.addData(text);
-    qr.make();
-    const n = qr.getModuleCount();
-    const margin = 2;
-    let d = "";
-    for (let r = 0; r < n; r++) {
-      for (let c = 0; c < n; c++) if (qr.isDark(r, c)) d += `M${c + margin} ${r + margin}h1v1h-1z`;
-    }
-    const size = n + margin * 2;
-    container.innerHTML = `<svg viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges" role="img" aria-label="קוד QR לחיבור המכשיר"><rect width="${size}" height="${size}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
-  }
 
   function stopPairTicker() {
     clearInterval(pairTicker);
@@ -2118,7 +2322,6 @@
     if (!left) {
       stopPairTicker();
       $.pairTimer.textContent = "הקוד פג תוקף";
-      $.pairQr.classList.add("expired");
       $.pairCode.classList.add("expired");
       $.pairRefreshBtn.classList.remove("hidden");
       return;
@@ -2130,10 +2333,8 @@
   async function refreshPairCode() {
     stopPairTicker();
     $.pairRefreshBtn.classList.add("hidden");
-    $.pairQr.classList.remove("expired");
     $.pairCode.classList.remove("expired");
-    $.pairQr.classList.add("loading");
-    $.pairQr.innerHTML = "";
+    $.pairCode.classList.add("loading");
     $.pairCode.textContent = "••• •••";
     $.pairTimer.textContent = "יוצר קוד…";
     let res = null;
@@ -2145,7 +2346,7 @@
     } catch (e) {
       res = null;
     }
-    $.pairQr.classList.remove("loading");
+    $.pairCode.classList.remove("loading");
     if (!isOpen($.pairOverlay)) return;
     if (!res || !res.ok) {
       $.pairTimer.textContent = res && res.status === 401
@@ -2157,7 +2358,6 @@
     const { code, ttlMs } = res.body;
     pairExpiresAt = Date.now() + (ttlMs || 5 * 60 * 1000); // relative, so a wrong device clock doesn't matter
     $.pairCode.textContent = `${code.slice(0, 3)} ${code.slice(3)}`;
-    renderQr($.pairQr, `${appBaseUrl()}?pair=${code}`);
     tickPairCode();
     pairTicker = setInterval(tickPairCode, 1000);
   }
@@ -2194,7 +2394,7 @@
   // Layout
   $.layoutToggleBtn.addEventListener("click", () => {
     setViewMode(viewMode === "store" ? "list" : "store");
-    showToast(viewMode === "store" ? "🧭 מסודר לפי המסלול בסופר" : "📋 תצוגת רשימה רגילה");
+    showToast(viewMode === "store" ? "🧭 מסודר לפי המעברים בסופר" : "📋 תצוגת רשימה רגילה");
   });
   const openOrder = () => { renderOrderList(); openSheet($.orderOverlay); };
   $.orderBtn.addEventListener("click", openOrder);
@@ -2254,15 +2454,15 @@
   });
 
   // Share & account
-  $.enableSyncBtn.addEventListener("click", () => openWelcome());
   $.membersBtn.addEventListener("click", openAccountModal);
   wireSheet($.accountOverlay, $.closeAccountBtn);
   $.saveListNameBtn.addEventListener("click", saveListName);
   $.listNameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") saveListName(); });
-  $.shareLinkBtn.addEventListener("click", shareInviteLink);
-  $.shareWhatsappBtn.addEventListener("click", shareViaWhatsapp);
-  $.shareSmsBtn.addEventListener("click", shareViaSms);
-  $.copyLinkBtn.addEventListener("click", copyInviteLink);
+  $.togetherBtn.addEventListener("click", makeListTogether);
+  wireSheet($.shareFallbackOverlay, $.closeShareFallbackBtn);
+  [$.shareWhatsappLink, $.shareSmsLink].forEach((a) => a.addEventListener("click", () => {
+    setTimeout(() => closeSheet($.shareFallbackOverlay), 300);
+  }));
   $.regenCodeBtn.addEventListener("click", () => {
     showConfirm("ליצור קישור הזמנה חדש? הקישור הקודם יפסיק לעבוד (מי שכבר הצטרף יישאר).", () => loadInviteCode(true));
   });
@@ -2285,6 +2485,10 @@
   $.logoutBtn.addEventListener("click", logout);
 
   // Profile tab
+  $.premiumBtn.addEventListener("click", () => {
+    haptic([15]);
+    toast({ text: "Premium יגיע בקרוב — נעדכן אתכם ראשונים!", icon: "✨", ms: 3500 });
+  });
   $.profileSyncBtn.addEventListener("click", () => openWelcome());
   $.profileListsBtn.addEventListener("click", openListsSheet);
   $.profileTemplatesBtn.addEventListener("click", openTemplates);
@@ -2328,6 +2532,45 @@
     $.registerPanel.classList.remove("hidden");
   });
 
+  /* ---------- AI Fridge Vision ---------- */
+  function openFridgeVision() {
+    if (!account) {
+      openWelcome("צרו חשבון כדי להשתמש ב-AI Chef ובזיהוי המקרר. הפריטים שכבר ברשימה יישמרו.");
+      return;
+    }
+    openSheet($.fridgeOverlay);
+  }
+
+  async function onFridgePhoto(input) {
+    const file = input.files && input.files[0];
+    input.value = ""; // picking the same photo again must fire "change" again
+    closeSheet($.fridgeOverlay);
+    if (!file) return;
+    try {
+      const result = await window.FridgeVision.analyzeFridgeImage(file, {
+        listItems: items.filter((i) => !i.bought).map((i) => i.name),
+      });
+      AIChat.postLocal(
+        { role: "user", text: "📸 מה חסר לי במקרר?", image: result.image.dataUrl },
+        {
+          role: "model",
+          text: result.ready
+            ? "מנתח את התמונה…"
+            : "התמונה מוכנה לניתוח ✓\nזיהוי אוטומטי של מצרכים חסרים מהמקרר יופעל בקרוב. בינתיים אפשר לכתוב לי מה רואים במקרר ואציע מה לקנות.",
+        },
+      );
+    } catch (e) {
+      showToast("לא הצלחנו לקרוא את התמונה. נסו תמונה אחרת.", 3500);
+    }
+  }
+
+  $.fridgeBtn.addEventListener("click", openFridgeVision);
+  wireSheet($.fridgeOverlay, $.closeFridgeBtn);
+  $.fridgeCameraBtn.addEventListener("click", () => $.fridgeCameraInput.click());
+  $.fridgeUploadBtn.addEventListener("click", () => $.fridgeUploadInput.click());
+  $.fridgeCameraInput.addEventListener("change", () => onFridgePhoto($.fridgeCameraInput));
+  $.fridgeUploadInput.addEventListener("change", () => onFridgePhoto($.fridgeUploadInput));
+
   /* ---------- Init ---------- */
   takeLinkParamsFromUrl();
   loadState();
@@ -2350,6 +2593,7 @@
   $.appVersion.textContent = `רשימת קניות ${(window.APP_CONFIG && window.APP_CONFIG.APP_VERSION) || ""}${Native.isApp ? " · Android" : ""}`;
   setViewMode(viewMode);
   renderAccountUI();
+  renderNotifySetting();
   setupVoice();
 
   const hasInvite = BACKEND_URL && !!readJSON(STORAGE_KEYS.pendingJoin, null);
@@ -2359,7 +2603,7 @@
     if (pendingPair) showToast("המכשיר הזה כבר מחובר לחשבון ✓", 3500);
     else if (hasInvite) showToast("מצטרפים לרשימה המשותפת…", 8000);
   } else if (pendingPair) {
-    // Scanned the QR of a signed-in device: connect without typing.
+    // Opened a ?pair=CODE link from a signed-in device: connect without typing.
     openWelcome("מחברים את המכשיר לחשבון שלכם…", "link");
     $.linkCodeInput.value = pendingPair;
     linkDevice(pendingPair);
