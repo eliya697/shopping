@@ -156,6 +156,33 @@ async function readEvents(res) {
   events = await readEvents(await post({ message: "היי" }));
   assert.deepEqual(events.find((e) => e.event === "done").data, { reply: "רק טקסט בלי נתונים", sections: [], missing: [], imageSummary: "" });
 
+  // Suggestion chips: the first ask goes to Gemini without the asker's list (the answer is
+  // shared); repeats within the hour are served from memory with no Gemini call.
+  const chip = "מה בעונה עכשיו?";
+  calls.length = 0;
+  script = { "gemini-2.5-flash": [{ chunks: ["תותים ", "ותפוזים!", "\n<<<DATA>>>{\"missing\":[],\"sections\":[{\"title\":\"עונה\",\"items\":[{\"name\":\"תותים\",\"quantity\":\"\",\"category\":\"produce\"}]}]}"] }] };
+  const first = (await readEvents(await post({ message: chip, listItems: ["חלב פרטי של מישהו"] }))).find((e) => e.event === "done").data;
+  assert.equal(calls.length, 1);
+  assert(!JSON.stringify(calls[0].body).includes("חלב פרטי"), "a shared answer isn't built from one user's list");
+  calls.length = 0;
+  let t0 = Date.now();
+  events = await readEvents(await post({ message: `  ${chip} ` }));
+  assert.equal(calls.length, 0, "cache hit: Gemini not called");
+  assert(Date.now() - t0 < 200, "served immediately");
+  assert.equal(events.find((e) => e.event === "delta").data.text, first.reply);
+  assert.deepEqual(events.find((e) => e.event === "done").data, first);
+  // Not cached: a chip asked mid-conversation, or any other text.
+  script = { "gemini-2.5-flash": [{ chunks: ["אחר"] }, { chunks: ["אחר"] }] };
+  await readEvents(await post({ message: chip, history: [{ role: "user", text: "היי" }, { role: "model", text: "שלום" }] }));
+  await readEvents(await post({ message: "מה בעונה עכשיו" }));
+  assert.equal(calls.length, 2);
+  // Expired entries are dropped.
+  for (const entry of ai.promptCache.values()) entry.expires = Date.now() - 1;
+  script = { "gemini-2.5-flash": [{ chunks: ["חדש"] }] };
+  calls.length = 0;
+  await readEvents(await post({ message: chip }));
+  assert.equal(calls.length, 1, "after the TTL, Gemini is asked again");
+
   // Quota on every model: one `error` event with the same shape /chat uses.
   script = {
     "gemini-2.5-flash": [{ status: 429, body: { error: { message: "Quota exceeded", details: [{ "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "30s" }] } } }],

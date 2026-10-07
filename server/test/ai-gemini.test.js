@@ -21,6 +21,7 @@ const fake = http.createServer((req, res) => {
     const body = JSON.parse(raw || "{}");
     calls.push({ model, schema: !!body.generationConfig.responseSchema, thinking: body.generationConfig.thinkingConfig || null, key: req.headers["x-goog-api-key"] });
     const next = (script[model] || []).shift() || { status: 404, body: { error: { message: `models/${model} is not found` } } };
+    if (next === "hang") return; // never answers
     res.writeHead(next.status, { "content-type": "application/json" });
     res.end(JSON.stringify(next.body));
   });
@@ -51,21 +52,40 @@ const good = JSON.stringify({ reply: "שקשוקה!", sections: [{ title: "שק�
   assert.equal(calls[0].key, "test-key");
   assert.equal(ai.health.model, "gemini-2.5-flash", "remembers the model that worked");
 
-  // Overloaded once, then OK: one retry on the same model.
+  // Overloaded: no retry on the same model and no pause — the next model at once, while
+  // the failed one rests for 60s.
   calls.length = 0;
-  script = { "gemini-2.5-flash": [{ status: 503, body: { error: { message: "The model is overloaded" } } }, answer(good)] };
-  res = await ask();
-  assert.equal(res.reply, "שקשוקה!");
-  assert.deepEqual(calls.map((c) => c.model), ["gemini-2.5-flash", "gemini-2.5-flash"]);
-
-  // Overloaded twice: no third hammering of the same model; the next model, after a pause.
-  calls.length = 0;
-  script = { "gemini-2.5-flash": [{ status: 503, body: {} }, { status: 500, body: {} }], "gemini-3-flash": [answer(good)] };
+  script = { "gemini-2.5-flash": [{ status: 503, body: { error: { message: "The model is overloaded" } } }], "gemini-3-flash": [answer(good)] };
   let t0 = Date.now();
   res = await ask();
   assert.equal(res.reply, "שקשוקה!");
-  assert.deepEqual(calls.map((c) => c.model), ["gemini-2.5-flash", "gemini-2.5-flash", "gemini-3-flash"]);
-  assert(Date.now() - t0 >= 2000, "2s pause before falling back to another model");
+  assert.deepEqual(calls.map((c) => c.model), ["gemini-2.5-flash", "gemini-3-flash"]);
+  assert(Date.now() - t0 < 1000, "no sleeping between models");
+  assert(ai.health.cooldown.get("gemini-2.5-flash") - Date.now() > 55000, "the failed model rests 60s");
+  calls.length = 0;
+  script = { "gemini-3-flash": [answer(good)] };
+  await ask();
+  assert.deepEqual(calls.map((c) => c.model), ["gemini-3-flash"], "a resting model isn't called");
+  ai.health.cooldown.clear();
+
+  // A hanging model times out after attemptMs (not the whole budget) and the next one answers.
+  const legacyTiming = { ...ai.TIMING.legacy };
+  Object.assign(ai.TIMING.legacy, { attemptMs: 300, budgetMs: 2000 });
+  calls.length = 0;
+  script = { "gemini-3-flash": ["hang"], "gemini-2.5-flash": [answer(good)] };
+  t0 = Date.now();
+  res = await ask();
+  assert.equal(res.reply, "שקשוקה!");
+  assert(Date.now() - t0 < 1000, `hang cut off at attemptMs (took ${Date.now() - t0}ms)`);
+  // Every model hangs: a clean "busy" error within the budget, never a 45s wait.
+  ai.health.cooldown.clear();
+  script = { "gemini-2.5-flash": ["hang"], "gemini-3-flash": ["hang"] };
+  t0 = Date.now();
+  await assert.rejects(ask(), (e) => e.reason === "cooldown" && e.retryAfterMs > 0);
+  assert(Date.now() - t0 <= 2100, `gave up within the budget (took ${Date.now() - t0}ms)`);
+  Object.assign(ai.TIMING.legacy, legacyTiming);
+  ai.health.cooldown.clear();
+  ai.health.model = "gemini-2.5-flash";
 
   // Schema rejected -> same model again without responseSchema; fenced JSON is still parsed.
   calls.length = 0;
@@ -80,8 +100,7 @@ const good = JSON.stringify({ reply: "שקשוקה!", sections: [{ title: "שק�
   await assert.rejects(ask(), (e) => e.reason === "invalid_key");
   assert.equal(calls.length, 1);
 
-  // Quota (429): the model rests for Gemini's retryDelay, and after a 2s pause a
-  // lite model (separate quota) answers. 404s cost no quota and get no pause.
+  // Quota (429): the model rests 60s, and a lite model (separate quota) is asked at once.
   listed = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
   await ai.checkGemini();
   const quota = (delay) => ({ status: 429, body: { error: { message: "Resource has been exhausted (e.g. check quota).",
@@ -92,10 +111,9 @@ const good = JSON.stringify({ reply: "שקשוקה!", sections: [{ title: "שק�
   res = await ask();
   assert.equal(res.reply, "שקשוקה!");
   assert.deepEqual(calls.map((c) => c.model), ["gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-2.5-flash-lite"]);
-  assert(Date.now() - t0 >= 4000, "a 2s pause after each quota hit");
+  assert(Date.now() - t0 < 1000, "no pause after a quota hit");
   const rest = (m) => ai.health.cooldown.get(m) - Date.now();
-  assert(rest("gemini-flash-latest") > 25000 && rest("gemini-flash-latest") <= 30000, "uses Gemini's retryDelay");
-  assert(rest("gemini-2.5-flash") > 55000, "defaults to 60s");
+  assert(rest("gemini-flash-latest") > 55000 && rest("gemini-2.5-flash") > 55000, "both rest 60s");
   assert.notEqual(ai.health.model, "gemini-2.5-flash-lite", "a lite stopgap doesn't become the main model");
 
   // While they rest, cooled models aren't called at all.
@@ -103,10 +121,12 @@ const good = JSON.stringify({ reply: "שקשוקה!", sections: [{ title: "שק�
   script = { "gemini-2.5-flash-lite": [quota()] };
   await assert.rejects(ask(), (e) => e.reason === "quota" && e.retryAfterMs > 0);
   assert.deepEqual(calls.map((c) => c.model), ["gemini-2.5-flash-lite"]);
-  // Everything cooling down: answer "quota" at once, without spending another request.
+  // Everything resting: "busy" at once, without spending another request.
   calls.length = 0;
-  await assert.rejects(ask(), (e) => e.reason === "quota" && e.retryAfterMs > 0);
+  t0 = Date.now();
+  await assert.rejects(ask(), (e) => e.reason === "cooldown" && e.retryAfterMs > 0);
   assert.equal(calls.length, 0);
+  assert(Date.now() - t0 < 50);
   ai.health.cooldown.clear();
 
   // Production case: the key's model list has none of the built-in names, and the

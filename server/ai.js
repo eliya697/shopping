@@ -16,10 +16,13 @@
  * "model overloaded" under load. So the server
  *   - checks the key on startup and picks a model the key can actually use
  *     (result in the Render log and in GET /api/ai/status),
- *   - falls back to other Flash models when a model is gone,
- *   - retries transient errors (503/500/timeouts) with a short backoff,
+ *   - fails fast: a model that errors (429/5xx/timeout) rests for 60s and the next model is
+ *     tried at once, with no backoff, so a question gets an answer or an error in seconds,
  *   - retries without the JSON schema if Gemini rejects it, and parses JSON leniently,
- *   - tells the app *why* a call failed (`reason`) instead of a bare 502.
+ *   - tells the app *why* a call failed (`reason`, and a Hebrew `message`) instead of a bare 502.
+ *
+ * The suggestion chips ("מה בעונה עכשיו?"…) are asked by everyone, word for word: their
+ * answers are cached in memory for an hour and served without calling Gemini.
  */
 const express = require("express");
 const store = require("./db");
@@ -35,14 +38,31 @@ const LITE_CANDIDATES = ["gemini-flash-lite-latest", "gemini-2.5-flash-lite"];
 const LEGACY_IF_LISTED = ["gemini-1.5-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro"];
 const MAX_MAIN_MODELS = 3;
 const MAX_LITE_MODELS = 2;
-const FALLBACK_DELAY_MS = 2000; // between models after a quota/transient failure, so retries don't hammer the quota
-const MAX_QUOTA_FALLBACKS = 2; // per question
-const QUOTA_COOLDOWN_MS = 60000; // when Gemini doesn't say how long to wait
+const MODEL_COOLDOWN_MS = 60000; // a model that failed is skipped (for everyone) this long
 // Short answers are fast answers: the prompt asks for at most 8 products and the server enforces it.
 const MAX_ITEMS_PER_ANSWER = 8;
-const REQUEST_TIMEOUT_MS = 25000;
-const MAX_ATTEMPTS_PER_MODEL = 2; // one retry for transient errors (overloaded, timeout), then the next model
-const TOTAL_BUDGET_MS = 45000; // all models and retries together; the app waits 60s
+/*
+ * Time limits, per question. `attemptMs` caps one model, `budgetMs` all models together;
+ * nothing sleeps between models. For streaming they time the wait for the first token only.
+ * A photo gets longer: Gemini reads the whole image before it writes a word.
+ * The non-streaming /chat (older app versions) must produce the entire JSON answer in time.
+ */
+const TIMING = {
+  stream: { attemptMs: 4000, budgetMs: 5000 },
+  streamImage: { attemptMs: 8000, budgetMs: 10000 },
+  legacy: { attemptMs: 12000, budgetMs: 15000 },
+};
+const MIN_ATTEMPT_MS = 1000; // less budget than this left: don't start another model
+
+// The app's suggestion chips (ai-chat.js PROMPTS): identical for everyone, so cacheable.
+const CACHEABLE_PROMPTS = new Set([
+  "3 רעיונות לארוחת ערב",
+  "מה בעונה עכשיו?",
+  "מה לקנות בתקציב נמוך 💰",
+  "מזונות עשירים בחלבון 🦾",
+  "ארוחת שבת לשישה 🕯️",
+]);
+const PROMPT_CACHE_TTL_MS = 60 * 60 * 1000;
 
 const LIMIT_PER_HOUR = 40;
 const MAX_MESSAGE_CHARS = 1000;
@@ -157,7 +177,31 @@ function streamSystemPrompt(now = new Date()) {
 const geminiKey = () => String(process.env.GEMINI_API_KEY || "").trim().replace(/^["']|["']$/g, "").trim();
 
 const clip = (value, max) => (typeof value === "string" ? value.trim().slice(0, max) : "");
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* ---------- Suggestion-chip cache (in memory, 1 hour) ----------
+ * Only a chip's exact text, asked as the first question of a chat with no photo. A cached
+ * answer is shared by everyone, so it is generated without the asker's shopping list (the
+ * app marks suggested items that are already on the list by itself).
+ */
+const promptCache = new Map(); // "<chat|stream>:<prompt>" -> { answer, expires }
+
+function promptCacheKey(kind, chat) {
+  if (chat.image || chat.history.length) return null;
+  const prompt = chat.message.replace(/\s+/g, " ").trim();
+  return CACHEABLE_PROMPTS.has(prompt) ? `${kind}:${prompt}` : null;
+}
+
+function cachedAnswer(key) {
+  const entry = key && promptCache.get(key);
+  if (!entry) return null;
+  if (entry.expires > Date.now()) return entry.answer;
+  promptCache.delete(key);
+  return null;
+}
+
+function rememberAnswer(key, answer) {
+  if (key && answer && answer.reply) promptCache.set(key, { answer, expires: Date.now() + PROMPT_CACHE_TTL_MS });
+}
 
 /* ---------- Per-user rate limit (in memory; resets on restart, good enough for a single instance) ---------- */
 const hits = new Map();
@@ -210,7 +254,8 @@ function classify(status, message) {
 /* Gemini's own error text, safe to show: trimmed, and any API key in it redacted. */
 const redact = (text) => String(text || "").replace(/AIza[0-9A-Za-z_-]{10,}/g, "AIza…").slice(0, 300);
 
-const TRANSIENT = new Set(["overloaded", "timeout", "bad_response", "network"]);
+// Failures that say "this model, right now": the model rests and the next one is tried.
+const COOLDOWN_REASONS = new Set(["quota", "overloaded", "timeout", "bad_response", "network"]);
 
 /* ---------- Model selection ---------- */
 const health = {
@@ -402,7 +447,7 @@ function thinkingConfigFor(model) {
   return null;
 }
 
-async function callModel({ apiKey, model, contents, useSchema, useThinkingConfig = true, timeoutMs = REQUEST_TIMEOUT_MS }) {
+async function callModel({ apiKey, model, contents, useSchema, useThinkingConfig = true, timeoutMs = TIMING.legacy.attemptMs }) {
   const thinkingConfig = useThinkingConfig ? thinkingConfigFor(model) : null;
   let res;
   try {
@@ -432,7 +477,7 @@ async function callModel({ apiKey, model, contents, useSchema, useThinkingConfig
     const err = new GeminiError(classify(res.status, message), `${model} ${res.status}: ${redact(message)}`, res.status);
     err.detail = redact(message);
     err.model = model;
-    if (err.reason === "quota") err.retryAfterMs = retryDelayMs(body) || QUOTA_COOLDOWN_MS;
+    if (err.reason === "quota") err.retryAfterMs = retryDelayMs(body) || MODEL_COOLDOWN_MS;
     throw err;
   }
   const candidate = body.candidates && body.candidates[0];
@@ -446,84 +491,82 @@ async function callModel({ apiKey, model, contents, useSchema, useThinkingConfig
   return sanitizeAnswer(parsed);
 }
 
-/*
- * Runs run({ model, useSchema, useThinkingConfig, timeoutMs }) on each model in modelOrder()
- * until one succeeds: retries transient errors, rests a model after a quota hit, drops a
- * missing model, and gives up at once on errors another model can't fix.
- */
-async function tryModels(run) {
-  const deadline = Date.now() + TOTAL_BUDGET_MS;
-  const models = modelOrder();
+/* Every usable model is resting: no point calling anyone. retryAfterMs = the first one back. */
+function allCoolingDown() {
+  const now = Date.now();
+  const until = Math.min(...[...health.cooldown.values()].filter((t) => t > now));
+  const err = new GeminiError("cooldown", "every model failed in the last minute");
+  err.retryAfterMs = Number.isFinite(until) ? Math.max(1000, until - now) : MODEL_COOLDOWN_MS;
+  return err;
+}
 
-  // Every model is still cooling down after a 429: answer now instead of spending more quota.
-  if (!models.length && health.cooldown.size) {
-    const until = Math.min(...health.cooldown.values());
-    const err = new GeminiError("quota", "all models are cooling down after quota errors");
-    err.retryAfterMs = Math.max(1000, until - Date.now());
-    throw err;
-  }
+/*
+ * Fail-fast fallback: runs run({ model, useSchema, useThinkingConfig, timeoutMs }) on each
+ * model in modelOrder() until one succeeds. A model that errors — quota, overloaded, timeout,
+ * garbled answer, network — rests for MODEL_COOLDOWN_MS and the next model is tried right
+ * away: no retries on the same model, no sleeping. A 404 drops the model for good. Errors
+ * another model can't fix (bad key, blocked content, cancelled) end the question at once.
+ * `timing` is one of TIMING.
+ */
+async function tryModels(run, timing = TIMING.legacy) {
+  const started = Date.now();
+  const deadline = started + timing.budgetMs;
+  const models = modelOrder();
+  if (!models.length && health.cooldown.size) throw allCoolingDown();
 
   let lastError = new GeminiError("model_not_found", "no model to try");
-  let quotaHits = 0;
-  let quotaError = null; // reported over later 404s: "quota" is the useful answer
-  let pauseBeforeNext = false;
+  let quotaError = null; // reported over later 404s: "quota" is the more useful answer
+  let cooled = false; // some model failed and is resting: "busy" is the answer, not its own error
 
   for (const model of models) {
-    if (pauseBeforeNext) await sleep(FALLBACK_DELAY_MS);
-    pauseBeforeNext = false;
     let useSchema = true;
     let useThinkingConfig = true;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_MODEL; attempt++) {
+    // At most one instant re-ask on the same model, when only our request settings were rejected.
+    for (let attempt = 1; attempt <= 2; attempt++) {
       const remaining = deadline - Date.now();
-      if (remaining < 3000) throw lastError.reason === "model_not_found" ? new GeminiError("timeout", "out of time") : lastError;
+      if (remaining < MIN_ATTEMPT_MS) {
+        console.warn(`[ai] out of time after ${Date.now() - started}ms`);
+        throw quotaError || (cooled || lastError.reason === "model_not_found" ? allCoolingDown() : lastError);
+      }
       try {
-        const answer = await run({ model, useSchema, useThinkingConfig, timeoutMs: Math.min(REQUEST_TIMEOUT_MS, remaining) });
+        const answer = await run({ model, useSchema, useThinkingConfig, timeoutMs: Math.min(timing.attemptMs, remaining) });
         if (health.model !== model && !isLite(model)) console.log(`[ai] now using model ${model}`);
-        // Lite models are a stopgap during a quota hit; keep preferring the main model.
+        // Lite models are a stopgap while the main ones rest; keep preferring the main model.
         Object.assign(health, { ok: true, reason: null }, isLite(model) ? {} : { model });
         return answer;
       } catch (err) {
         lastError = err;
-        console.warn(`[ai] ${model} attempt ${attempt} failed (${err.reason}): ${err.message}`);
-        if (err.reason === "schema" && useSchema) {
+        console.warn(`[ai] ${model} failed after ${Date.now() - started}ms (${err.reason}): ${err.message}`);
+        if (err.reason === "schema" && useSchema && attempt === 1) {
           useSchema = false; // the prompt also describes the JSON shape
           continue;
         }
-        if (err.reason === "thinking" && useThinkingConfig) {
+        if (err.reason === "thinking" && useThinkingConfig && attempt === 1) {
           useThinkingConfig = false; // this model doesn't take our thinking setting: use its default
           continue;
         }
         if (err.reason === "model_not_found") {
-          health.dead.add(model); // a 404 costs no quota: move on right away
+          health.dead.add(model);
           if (health.model === model) health.model = null;
           break;
         }
-        if (err.reason === "quota") {
-          // Quotas are per model: rest this one, and try another (a lite model) after a pause.
-          health.cooldown.set(model, Date.now() + (err.retryAfterMs || QUOTA_COOLDOWN_MS));
-          quotaError = err;
-          if (++quotaHits > MAX_QUOTA_FALLBACKS) throw err;
-          pauseBeforeNext = true;
-          break;
-        }
-        if (TRANSIENT.has(err.reason) && attempt < MAX_ATTEMPTS_PER_MODEL) {
-          await sleep(1000);
-          continue;
-        }
-        if (TRANSIENT.has(err.reason)) {
-          pauseBeforeNext = true; // this model keeps failing: next one, after a pause
+        if (COOLDOWN_REASONS.has(err.reason)) {
+          health.cooldown.set(model, Date.now() + MODEL_COOLDOWN_MS);
+          cooled = true;
+          if (err.reason === "quota") quotaError = err;
           break;
         }
         throw err; // invalid_key, forbidden, blocked, bad_request, cancelled: another model won't help
       }
     }
   }
-  throw quotaError || lastError;
+  if (quotaError) quotaError.retryAfterMs = allCoolingDown().retryAfterMs;
+  throw quotaError || (cooled ? allCoolingDown() : lastError);
 }
 
 async function askGemini({ apiKey, history, message, listItems }) {
   const contents = buildContents(history, message, listItems);
-  return tryModels((o) => callModel({ apiKey, contents, ...o }));
+  return tryModels((o) => callModel({ apiKey, contents, ...o }), TIMING.legacy);
 }
 
 /* ---------- Streaming ---------- */
@@ -571,7 +614,7 @@ async function openStream({ apiKey, model, contents, useThinkingConfig, timeoutM
     const err = new GeminiError(classify(res.status, message), `${model} ${res.status}: ${redact(message)}`, res.status);
     err.detail = redact(message);
     err.model = model;
-    if (err.reason === "quota") err.retryAfterMs = retryDelayMs(body) || QUOTA_COOLDOWN_MS;
+    if (err.reason === "quota") err.retryAfterMs = retryDelayMs(body) || MODEL_COOLDOWN_MS;
     throw err;
   }
   return { res, model, controller, release: () => signal && signal.removeEventListener("abort", onCancel) };
@@ -677,7 +720,7 @@ function finalizeStream(text, data, hadImage) {
  */
 async function streamGemini({ apiKey, history, message, listItems, image = null, signal, onText }) {
   const contents = buildContents(history, message, listItems, image);
-  const stream = await tryModels((o) => openStream({ apiKey, contents, signal, ...o }));
+  const stream = await tryModels((o) => openStream({ apiKey, contents, signal, ...o }), image ? TIMING.streamImage : TIMING.stream);
   const splitter = new ReplySplitter(onText);
   let finish = null;
   let blocked = null;
@@ -800,7 +843,7 @@ function describeFailure(err) {
     return { status: 200, headers: {}, body: { reply: "אני לא יכול לעזור עם זה. אפשר לשאול אותי על ארוחות, מתכונים וקניות 🙂", sections: [] } };
   }
   if (reason === "quota") {
-    const retryAfter = Math.ceil((err.retryAfterMs || QUOTA_COOLDOWN_MS) / 1000);
+    const retryAfter = Math.ceil((err.retryAfterMs || MODEL_COOLDOWN_MS) / 1000);
     return {
       status: 429,
       headers: { "Retry-After": String(retryAfter) },
@@ -815,11 +858,37 @@ function describeFailure(err) {
       },
     };
   }
+  if (reason === "cooldown") {
+    const retryAfter = Math.ceil((err.retryAfterMs || MODEL_COOLDOWN_MS) / 1000);
+    return {
+      status: 503,
+      headers: { "Retry-After": String(retryAfter) },
+      body: { error: "all models are resting", code: "AI_FAILED", reason, message: FAILURE_MESSAGES.cooldown, retryAfter, detail },
+    };
+  }
   // Structured, so the app can say exactly what's wrong (bad key, missing model…).
-  const body = { error: "assistant unavailable", code: "AI_FAILED", reason, detail, model: err.model || null };
+  const body = {
+    error: "assistant unavailable",
+    code: "AI_FAILED",
+    reason,
+    message: FAILURE_MESSAGES[reason] || FAILURE_MESSAGES.default,
+    detail,
+    model: err.model || null,
+  };
   if (reason === "model_not_found" && health.available) body.tried = [...health.dead];
   return { status: 502, headers: {}, body };
 }
+
+/* What the user reads when a question fails (the app shows its own text for known reasons). */
+const FAILURE_MESSAGES = {
+  cooldown: "העוזר עמוס כרגע. נסו שוב בעוד דקה.",
+  timeout: "התשובה לקחה יותר מדי זמן. נסו שוב.",
+  overloaded: "Gemini עמוס כרגע. נסו שוב בעוד רגע.",
+  invalid_key: "מפתח ה-Gemini שמוגדר בשרת לא תקין, ולכן העוזר לא זמין.",
+  forbidden: "מפתח ה-Gemini בשרת לא מורשה להשתמש במודל.",
+  model_not_found: "אף מודל Gemini לא זמין כרגע.",
+  default: "העוזר לא זמין כרגע. נסו שוב.",
+};
 
 function aiRouter() {
   const router = express.Router();
@@ -843,6 +912,7 @@ function aiRouter() {
       coolingDown: Object.fromEntries([...health.cooldown].map(([m, until]) => [m, Math.max(0, Math.ceil((until - Date.now()) / 1000))])),
       reason: health.reason,
       lastError: health.lastError,
+      cachedPrompts: [...promptCache.values()].filter((e) => e.expires > Date.now()).length,
       checkedAt: health.checkedAt,
     });
   });
@@ -851,8 +921,16 @@ function aiRouter() {
   router.post("/chat", smallJson, async (req, res) => {
     const chat = await prepareChat(req, res);
     if (!chat) return;
+    const cacheKey = promptCacheKey("chat", chat);
+    const hit = cachedAnswer(cacheKey);
+    if (hit) {
+      refund(chat.user.userId); // costs nothing, so it isn't counted
+      return res.set("X-AI-Cache", "hit").json(hit);
+    }
+    if (cacheKey) chat.listItems = []; // this answer will be shared
     try {
       const answer = await askGemini(chat);
+      rememberAnswer(cacheKey, answer);
       store.touchUser(chat.user.userId).catch(() => {});
       res.json(answer);
     } catch (err) {
@@ -885,6 +963,18 @@ function aiRouter() {
     });
     const open = () => !res.writableEnded && !res.destroyed;
     const send = (event, data) => open() && res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+
+    // A suggestion chip answered in the last hour: the whole answer at once, no Gemini call.
+    const cacheKey = promptCacheKey("stream", chat);
+    const hit = cachedAnswer(cacheKey);
+    if (hit) {
+      refund(chat.user.userId);
+      send("delta", { text: hit.reply });
+      send("done", hit);
+      return res.end();
+    }
+    if (cacheKey) chat.listItems = []; // this answer will be shared
+
     res.write(": stream open\n\n");
     const heartbeat = setInterval(() => open() && res.write(": ping\n\n"), STREAM_HEARTBEAT_MS);
 
@@ -902,6 +992,7 @@ function aiRouter() {
           send("delta", { text });
         },
       });
+      rememberAnswer(cacheKey, answer);
       store.touchUser(chat.user.userId).catch(() => {});
       send("done", answer);
     } catch (err) {
@@ -933,4 +1024,6 @@ aiRouter.ReplySplitter = ReplySplitter;
 aiRouter.finalizeStream = finalizeStream;
 aiRouter.parseImage = parseImage;
 aiRouter.DATA_MARKER = DATA_MARKER;
+aiRouter.promptCache = promptCache;
+aiRouter.TIMING = TIMING;
 module.exports = aiRouter;
