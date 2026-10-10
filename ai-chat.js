@@ -630,6 +630,7 @@
   root.AIChat = {
     init,
     sendPhoto: (image, question) => (opts ? sendPhoto(image, question) : Promise.resolve(false)),
+    ask: (text) => (opts ? send(text) : Promise.resolve(false)), // dashboard shortcuts
     postLocal: (...m) => opts && postLocal(...m),
     render: () => opts && render(),
     refreshAddButtons: () => opts && refreshAddButtons(),

@@ -19,6 +19,7 @@ const FILES = [
   "manifest.json",
   "icon.svg",
   "config.js",
+  "local-db.js",
   "categories.js",
   "item-parser.js",
   "quick-add.js",

@@ -1,9 +1,12 @@
 /*
  * SyncClient — thin real-time layer over Socket.io.
  *
- * - Every mutation goes into a persisted outbox (localStorage) and is sent in
- *   order with an ack. Nothing is lost if the tab closes while offline or while
- *   the Render free-tier instance is still waking up.
+ * - Every mutation goes into a persisted outbox (IndexedDB via LocalDB) and is
+ *   sent in order with an ack. Nothing is lost if the tab closes while offline or
+ *   while the Render free-tier instance is still waking up.
+ * - The outbox is compacted as ops are queued (toggle on/off of the same item,
+ *   add-then-delete, repeated edits), so a long offline stretch replays as few
+ *   round-trips as possible once the supermarket's reception comes back.
  * - All server operations are idempotent (client-generated ids, absolute values),
  *   so replaying the outbox after a reconnect is safe.
  * - On (re)connect: flush the outbox, then join the active list, which makes the
@@ -37,13 +40,13 @@
   ];
 
   function readQueue() {
-    try {
-      const q = JSON.parse(localStorage.getItem(QUEUE_KEY));
-      return Array.isArray(q) ? q : [];
-    } catch (e) {
-      return [];
-    }
+    const q = global.LocalDB ? global.LocalDB.get(QUEUE_KEY, []) : [];
+    return Array.isArray(q) ? q.slice() : [];
   }
+
+  // Ops on one item. Everything else (clear checked, reset) touches the whole list.
+  const ITEM_EVENTS = new Set(["item:add", "item:toggle", "item:update", "item:delete"]);
+  const itemIdOf = (e) => (e.payload && (e.payload.itemId || (e.payload.item && e.payload.item.itemId))) || null;
 
   class SyncClient {
     constructor({ url, token }) {
@@ -222,9 +225,48 @@
 
     /* ---------- Outbox ---------- */
     send(event, payload, op) {
-      this.queue.push({ event, payload, op });
+      if (!this.compact({ event, payload, op })) this.queue.push({ event, payload, op });
       this.saveQueue();
       this.flush();
+    }
+
+    /*
+     * Fold a new op into an older queued op for the same item instead of queueing it.
+     * Returns true when the new op was absorbed. Only ever looks back as far as the
+     * nearest list-wide op (a clear or reset depends on the item states before it),
+     * and stops at an op that was already emitted: the server may have it even if
+     * its ack never arrived, so it must not be merged into or dropped.
+     */
+    compact(entry) {
+      const itemId = itemIdOf(entry);
+      if (!itemId || !ITEM_EVENTS.has(entry.event)) return false;
+      const listId = entry.payload.listId;
+      const same = []; // indexes of queued ops on this item, oldest first
+      for (let i = this.queue.length - 1; i >= 0; i--) {
+        const e = this.queue[i];
+        if (!e.payload || e.payload.listId !== listId) continue;
+        if (!ITEM_EVENTS.has(e.event) || e.sent) break; // list-wide or already on the wire: stop
+        if (itemIdOf(e) === itemId) same.unshift(i);
+      }
+      if (!same.length) return false;
+      const last = this.queue[same[same.length - 1]];
+
+      // Absolute values: a newer toggle or edit of the same item supersedes the older one.
+      if (entry.event === "item:toggle" && last.event === "item:toggle") {
+        this.queue.splice(same[same.length - 1], 1);
+        return false;
+      }
+      if (entry.event === "item:update" && last.event === "item:update") {
+        last.payload.changes = { ...last.payload.changes, ...entry.payload.changes };
+        if (last.op && entry.op) last.op.changes = { ...last.op.changes, ...entry.op.changes };
+        return true;
+      }
+      // Added and deleted before the server ever heard of it: drop the whole history.
+      if (entry.event === "item:delete" && this.queue[same[0]].event === "item:add") {
+        for (let k = same.length - 1; k >= 0; k--) this.queue.splice(same[k], 1);
+        return true;
+      }
+      return false;
     }
 
     async flush() {
@@ -234,6 +276,7 @@
         while (this.queue.length && this.socket && this.socket.connected) {
           const entry = this.queue[0];
           let res;
+          entry.sent = true;
           try {
             res = await this.socket.timeout(ACK_TIMEOUT_MS).emitWithAck(entry.event, entry.payload);
           } catch (e) {
@@ -280,7 +323,7 @@
     }
 
     saveQueue() {
-      try { localStorage.setItem(QUEUE_KEY, JSON.stringify(this.queue)); } catch (e) {}
+      if (global.LocalDB) global.LocalDB.set(QUEUE_KEY, this.queue.slice());
       this.emitLocal("queue", this.queue.length);
     }
 
@@ -313,7 +356,7 @@
   }
 
   SyncClient.clearStoredQueue = () => {
-    try { localStorage.removeItem(QUEUE_KEY); } catch (e) {}
+    if (global.LocalDB) global.LocalDB.remove(QUEUE_KEY);
   };
 
   global.SyncClient = SyncClient;

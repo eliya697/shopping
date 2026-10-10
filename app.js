@@ -17,12 +17,13 @@
     storeOrder: "shoppingList.storeOrder.v1",
     learnedCategories: "shoppingList.learnedCategories.v1",
     pendingJoin: "shoppingList.pendingJoin.v1",
+    lastView: "shoppingList.lastView.v1", // { view, at }: reopen the shopping view mid-trip
     adminSession: "shoppingList.adminSession", // read by admin.html (same origin)
   };
 
   const BACKEND_URL = ((window.APP_CONFIG && window.APP_CONFIG.BACKEND_URL) || "").replace(/\/+$/, "");
   const PUBLIC_URL = (window.APP_CONFIG && window.APP_CONFIG.PUBLIC_URL) || "";
-  const { Categories, ItemParser, QuickAdd, VoiceInput, AIChat } = window;
+  const { Categories, ItemParser, QuickAdd, VoiceInput, AIChat, LocalDB } = window;
 
   /* ---------- Native shell (Capacitor Android). All no-ops in the browser. ---------- */
   const Cap = window.Capacitor;
@@ -79,7 +80,7 @@
   let sync = null;
   let syncStatus = "offline";
   let pendingCount = 0;
-  let activeTab = "lists"; // "lists" | "ai" | "profile"
+  let activeTab = "home"; // "home" (dashboard) | "lists" (shopping view) | "ai" | "profile"
   const flashIds = new Set(); // rows to highlight after a remote add
 
   /* ---------- Storage ---------- */
@@ -97,6 +98,11 @@
   function removeKey(key) {
     try { localStorage.removeItem(key); } catch (e) {}
   }
+  /*
+   * Items and list caches: memory-first reads, writes batched into IndexedDB after
+   * the frame that shows the change (see local-db.js), so a tap never waits on storage.
+   */
+  const listCacheKey = (listId) => STORAGE_KEYS.listCachePrefix + listId;
 
   /* Items saved by v1 have an integer `qty` and no notes. */
   function normalizeItem(i) {
@@ -124,21 +130,21 @@
       activeListId = readJSON(STORAGE_KEYS.activeList, null) || (lists[0] && lists[0].listId);
       loadListCache(activeListId);
     } else {
-      items = readJSON(STORAGE_KEYS.items, []).map(normalizeItem);
+      items = LocalDB.get(STORAGE_KEYS.items, []).map(normalizeItem);
     }
   }
 
   function loadListCache(listId) {
-    const cached = listId ? readJSON(STORAGE_KEYS.listCachePrefix + listId, null) : null;
+    const cached = listId ? LocalDB.get(listCacheKey(listId), null) : null;
     items = ((cached && cached.items) || []).map(normalizeItem);
     listInfo = (cached && cached.list) || null;
   }
 
   function saveItems() {
     if (account && activeListId) {
-      writeJSON(STORAGE_KEYS.listCachePrefix + activeListId, { list: listInfo, items });
+      LocalDB.set(listCacheKey(activeListId), { list: listInfo, items });
     } else {
-      writeJSON(STORAGE_KEYS.items, items);
+      LocalDB.set(STORAGE_KEYS.items, items);
     }
   }
   function saveTemplates() {
@@ -158,18 +164,24 @@
   const $ = {};
   [
     "listContainer", "emptyState", "subtitle", "filterRow", "searchInput",
-    "clearSearchBtn", "newItemInput", "addBtn", "resetAllBtn",
-    "templatesBtn", "templatesOverlay", "closeTemplatesBtn", "templateNameInput", "saveTemplateBtn",
+    "clearSearchBtn", "newItemInput", "addBtn", "resetAllBtn", "templatesOverlay", "closeTemplatesBtn", "templateNameInput", "saveTemplateBtn",
     "templatesList", "confirmOverlay", "confirmMessage", "confirmOkBtn", "confirmCancelBtn", "toastStack",
-    // header
-    "appTitle", "listSwitcherBtn", "listTitle", "connPill", "syncDot", "connText",
-    "membersBtn", "membersText", "syncBar", "togetherBtn",
+    // shopping view header & options sheet
+    "appTitle", "listSwitcherBtn", "listTitle", "connPill", "syncBar", "shopBackBtn", "shopMenuBtn",
+    "shopProgress", "shopMenuOverlay", "closeShopMenuBtn", "menuShareBtn", "menuMembersBtn", "menuMembersSub",
+    "menuTemplatesBtn", "menuOrderBtn", "menuClearBtn",
+    // home dashboard
+    "homeHello", "homeAvatarBtn", "homeListBtn", "homeListName", "homeListChev", "homeConnPill",
+    "homeRingFill", "homeRingText", "homeRemaining", "homeProgressSub", "homePreview", "startShoppingBtn",
+    "startShoppingText", "familyText", "memberStack", "homeInviteBtn", "homeMembersBtn", "chefPrompts",
+    "homeChefBtn", "homeFridgeBtn", "homeListsSection", "homeLists", "homeTemplatesBtn", "homeOrderBtn",
+    "homeNewListBtn",
     // tabs & profile
     "bottomNav", "profileGuestSection", "profileSyncBtn", "profileAccountSection", "profileSyncSection",
     "syncDetailText", "syncNowBtn", "profileListsBtn", "profileTemplatesBtn", "profileOrderBtn", "deviceSection",
     "appVersion", "premiumBtn", "notifySwitch", "notifySub", "themeSwitch",
     // roles
-    "headerRoleBadge", "profileRoleBadge", "ownerToolsSection", "adminDashboardBtn", "ownerOverlay",
+    "profileRoleBadge", "ownerToolsSection", "adminDashboardBtn", "ownerOverlay",
     "closeOwnerBtn", "ownerEmailInput", "ownerKeyInput", "ownerStatus", "ownerClaimBtn",
     // share fallback
     "shareFallbackOverlay", "closeShareFallbackBtn", "shareWhatsappLink", "shareSmsLink",
@@ -177,7 +189,7 @@
     "fridgeBtn", "fridgeOverlay", "closeFridgeBtn", "fridgeCameraBtn", "fridgeUploadBtn",
     "fridgeCameraInput", "fridgeUploadInput",
     // layout
-    "layoutToggleBtn", "orderBtn", "orderOverlay", "closeOrderBtn", "orderList", "resetOrderBtn",
+    "layoutToggleBtn", "orderOverlay", "closeOrderBtn", "orderList", "resetOrderBtn",
     // add bar
     "quickStrip", "quickAddBtn", "micBtn", "voicePanel", "voiceText", "voiceStopBtn",
     // quick-add sheet
@@ -580,8 +592,10 @@
   /* The ordered DOM nodes (section headers + rows) for the current view. */
   function layoutNodes(visible) {
     const nodes = [];
-    const open = visible.filter((i) => !i.bought);
-    const bought = visible.filter((i) => i.bought);
+    // A row that was just checked stays in place for its short celebration, then moves down.
+    const settling = (i) => pendingChecks.has(i.id);
+    const open = visible.filter((i) => !i.bought || settling(i));
+    const bought = visible.filter((i) => i.bought && !settling(i));
 
     if (viewMode === "store") {
       const byCat = new Map();
@@ -615,7 +629,9 @@
 
     const totalCount = items.length;
     const remaining = items.filter((i) => !i.bought).length;
-    $.subtitle.textContent = totalCount === 0 ? "הרשימה ריקה" : `${remaining} מתוך ${totalCount} נותרו לקנייה`;
+    $.subtitle.textContent = totalCount === 0 ? "הרשימה ריקה" : `${remaining} מתוך ${totalCount} נותרו`;
+    $.shopProgress.style.transform = `scaleX(${totalCount ? (totalCount - remaining) / totalCount : 0})`;
+    if (activeTab === "home") renderHome();
 
     const visible = getVisibleItems();
     const desired = layoutNodes(visible);
@@ -695,8 +711,7 @@
     const shared = listInfo && listInfo.members.length > 1;
     const adder = shared && item.addedBy && account && item.addedBy !== account.userId ? memberName(item.addedBy) : null;
 
-    // A row being checked off shows as bought during its short celebration, before it moves.
-    const bought = !!item.bought || pendingChecks.has(item.id);
+    const bought = !!item.bought;
     ref.circle.classList.toggle("checked", bought);
     ref.row.classList.toggle("is-bought", bought);
     ref.nameEl.classList.toggle("bought", bought);
@@ -937,18 +952,25 @@
   }
 
   function haptic(pattern = [30]) {
-    try { if (navigator.vibrate) navigator.vibrate(pattern); } catch (e) {}
+    // Browsers block vibration before the first tap (e.g. when boot() reopens the list).
+    const activated = !navigator.userActivation || navigator.userActivation.hasBeenActive;
+    try { if (navigator.vibrate && activated) navigator.vibrate(pattern); } catch (e) {}
   }
 
+  /*
+   * The V is committed on the tap itself: saved on the device and queued to the
+   * family right away (0ms locally, one round-trip for everyone else). Only the
+   * row's move into the "checked" drawer waits, so the animation can play.
+   */
   function toggleBought(id, circle) {
     const item = items.find((i) => i.id === id);
     if (!item) return;
 
-    // Tapped again while still celebrating: cancel the check-off.
+    // Tapped again while still celebrating: undo (the outbox folds the pair into nothing).
     if (pendingChecks.has(id)) {
       clearTimeout(pendingChecks.get(id));
       pendingChecks.delete(id);
-      upsertRow(item);
+      commit({ type: "toggle", id, bought: false });
       return;
     }
     if (item.bought) {
@@ -958,11 +980,9 @@
 
     pendingChecks.set(id, setTimeout(() => {
       pendingChecks.delete(id);
-      const current = items.find((i) => i.id === id);
-      if (current && !current.bought) commit({ type: "toggle", id, bought: true });
-      else render();
+      render();
     }, CHECK_SETTLE_MS));
-    upsertRow(item); // strikethrough + dim right away
+    commit({ type: "toggle", id, bought: true });
     if (circle) {
       circle.classList.remove("pop");
       void circle.offsetWidth; // restart the animation
@@ -1097,7 +1117,6 @@
     writeJSON(STORAGE_KEYS.viewMode, mode);
     $.layoutToggleBtn.classList.toggle("active", mode === "store");
     $.layoutToggleBtn.setAttribute("aria-pressed", String(mode === "store"));
-    $.orderBtn.classList.toggle("hidden", mode !== "store");
     render();
   }
 
@@ -1364,6 +1383,7 @@
     if (!templateItems) return;
     const addedCount = templateItems.filter((ti) => addNamed(ti)).length;
     closeSheet($.templatesOverlay);
+    if (addedCount && activeTab === "home") openShop();
     showToast(addedCount > 0 ? `${addedCount} פריטים נוספו מהתבנית` : "כל הפריטים כבר ברשימה");
   }
 
@@ -1427,7 +1447,7 @@
   function forgetList(listId) {
     lists = lists.filter((l) => l.listId !== listId);
     saveLists();
-    removeKey(STORAGE_KEYS.listCachePrefix + listId);
+    LocalDB.remove(listCacheKey(listId));
     if (sync) sync.dropList(listId);
   }
 
@@ -1443,11 +1463,12 @@
   function renderAccountUI() {
     $.appTitle.classList.toggle("hidden", !!account);
     $.listSwitcherBtn.classList.toggle("hidden", !account);
-    $.connPill.classList.toggle("hidden", !account);
-    $.togetherBtn.classList.toggle("hidden", !BACKEND_URL);
+    [$.connPill, $.homeConnPill].forEach((pill) => pill.classList.toggle("hidden", !account));
+    $.menuShareBtn.classList.toggle("hidden", !BACKEND_URL);
+    $.menuMembersBtn.classList.toggle("hidden", !account);
+    if (activeTab === "home") renderHome();
     if (!BACKEND_URL) return;
 
-    $.membersBtn.classList.toggle("hidden", !account);
     renderProfile();
     if (aiSignedIn !== !!account) {
       aiSignedIn = !!account;
@@ -1458,19 +1479,9 @@
       return;
     }
 
-    $.listTitle.textContent = "🛒 " + activeListName();
+    $.listTitle.textContent = activeListName();
     renderConnPill();
-
-    const meta = activeListMeta();
-    const memberCount = listInfo ? listInfo.members.length : meta ? meta.memberCount : 1;
-    if (!isOwnList()) {
-      const ownerName = (meta && meta.ownerName) || (listInfo && memberName(listInfo.ownerId)) || "";
-      $.membersText.textContent = `של ${ownerName}`;
-    } else if (memberCount > 1) {
-      $.membersText.textContent = `משותף עם ${memberCount - 1}`;
-    } else {
-      $.membersText.textContent = "רק את/ה";
-    }
+    $.menuMembersSub.textContent = sharingText();
     if (syncStatus === "online" && !invitePrefetched.has(activeListId)) {
       invitePrefetched.add(activeListId);
       prefetchInviteCode();
@@ -1485,6 +1496,18 @@
    * waking up (Render cold start) the cached list stays usable and a thin bar under
    * the header shows that a sync is in progress.
    */
+  /* "Only you" / "Shared with 2" / "Dana's list" for the active list. */
+  function sharingText() {
+    if (!account) return "";
+    const meta = activeListMeta();
+    const memberCount = listInfo ? listInfo.members.length : meta ? meta.memberCount : 1;
+    if (!isOwnList()) {
+      const ownerName = (meta && meta.ownerName) || (listInfo && memberName(listInfo.ownerId)) || "";
+      return `הרשימה של ${ownerName}`;
+    }
+    return memberCount > 1 ? `משותפת עם ${memberCount - 1}` : "רק את/ה";
+  }
+
   function renderConnPill() {
     let text;
     if (syncStatus === "online") {
@@ -1496,12 +1519,14 @@
     }
     const syncing = syncStatus === "connecting" || syncStatus === "waking" || (syncStatus === "online" && pendingCount > 0);
     $.syncBar.classList.toggle("hidden", !syncing);
-    $.connText.textContent = text;
-    $.syncDot.className = "sync-dot " + syncStatus;
-    $.connPill.classList.remove("online", "offline", "connecting", "waking");
-    $.connPill.classList.add(syncStatus);
-    $.connPill.classList.toggle("pending", !!pendingCount);
-    $.connPill.title = STATUS_TEXT[syncStatus] + (pendingCount ? ` (${pendingCount} שינויים ממתינים)` : "");
+    [$.connPill, $.homeConnPill].forEach((pill) => {
+      pill.querySelector(".conn-text").textContent = text;
+      pill.querySelector(".sync-dot").className = "sync-dot " + syncStatus;
+      pill.classList.remove("online", "offline", "connecting", "waking");
+      pill.classList.add(syncStatus);
+      pill.classList.toggle("pending", !!pendingCount);
+      pill.title = STATUS_TEXT[syncStatus] + (pendingCount ? ` (${pendingCount} שינויים ממתינים)` : "");
+    });
   }
 
   /* ---------- Roles (RBAC) ----------
@@ -1527,7 +1552,7 @@
   function renderRole() {
     const signedIn = !!account;
     const owner = isOwnerAccount();
-    [$.headerRoleBadge, $.profileRoleBadge].forEach((badge) => {
+    [$.profileRoleBadge].forEach((badge) => {
       badge.classList.toggle("hidden", !signedIn);
       badge.classList.toggle("owner", owner);
       badge.textContent = owner ? ROLE_LABEL.owner : ROLE_LABEL.user;
@@ -1654,11 +1679,40 @@
     $.saveUsernameBtn.classList.toggle("hidden", !account || !typed || typed === account.username);
   }
 
-  /* ---------- Floating dock navigation ---------- */
+  /* ---------- Navigation ----------
+   * Home (dashboard), AI Chef and Profile sit on the floating dock. The shopping view
+   * is a full-screen mode entered from the dashboard: no dock, just the list and the
+   * add bar. It gets its own history entry, so the phone's back gesture (and the
+   * Android back button) returns to the dashboard instead of leaving the app.
+   */
   const tabPanels = document.querySelectorAll(".tab-panel");
   const navButtons = Array.from($.bottomNav.querySelectorAll(".nav-btn"));
-  const tabOrder = navButtons.map((b) => b.dataset.tab);
+  const tabOrder = ["home", "lists", "ai", "profile"];
+  const dockOrder = navButtons.map((b) => b.dataset.tab);
   const navIndicator = $.bottomNav.querySelector(".nav-indicator");
+  const LAST_VIEW_TTL_MS = 30 * 60 * 1000;
+  const inShopHistory = () => !!(history.state && history.state.view === "lists");
+
+  function openShop() {
+    if (activeTab === "lists") return;
+    if (!inShopHistory()) history.pushState({ view: "lists" }, "");
+    switchTab("lists");
+  }
+
+  function leaveShop() {
+    if (inShopHistory()) history.back(); // popstate does the switch
+    else switchTab("home");
+  }
+
+  // Phone locked or app backgrounded mid-trip: remember where we were (see boot()).
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") writeJSON(STORAGE_KEYS.lastView, { view: activeTab, at: Date.now() });
+  });
+
+  window.addEventListener("popstate", () => {
+    if (inShopHistory()) switchTab("lists");
+    else if (activeTab === "lists") switchTab("home");
+  });
 
   function switchTab(tab) {
     if (tab === activeTab) {
@@ -1667,6 +1721,7 @@
     }
     // Slide in from the side of the tab we're moving toward (RTL: later tabs are to the left).
     const forward = tabOrder.indexOf(tab) > tabOrder.indexOf(activeTab);
+    if (activeTab === "lists" && document.activeElement === $.newItemInput) $.newItemInput.blur();
     activeTab = tab;
     document.body.dataset.tab = tab;
     tabPanels.forEach((panel) => {
@@ -1685,14 +1740,152 @@
       if (on) b.setAttribute("aria-current", "page");
       else b.removeAttribute("aria-current");
     });
-    navIndicator.style.setProperty("--i", tabOrder.indexOf(tab));
+    if (dockOrder.includes(tab)) navIndicator.style.setProperty("--i", dockOrder.indexOf(tab));
     haptic([8]);
     window.scrollTo(0, 0);
+    writeJSON(STORAGE_KEYS.lastView, { view: tab, at: Date.now() });
+    if (tab === "home") renderHome();
     if (tab === "lists") render();
     if (tab === "ai") AIChat.onShow();
     if (tab === "profile") renderProfile();
   }
-  navButtons.forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+  navButtons.forEach((b) => b.addEventListener("click", () => {
+    // The dock is hidden in the shopping view, but keep its history entry consistent anyway.
+    if (activeTab === "lists" && inShopHistory()) history.replaceState(null, "");
+    switchTab(b.dataset.tab);
+  }));
+
+  /* ---------- Home dashboard ---------- */
+  const CHEF_PROMPTS = ["מה לבשל הערב? 🍝", "ארוחת שבת לשישה 🕯️", "מה לקנות בתקציב נמוך 💰"];
+
+  function greeting() {
+    const h = new Date().getHours();
+    const part = h < 5 ? "לילה טוב" : h < 12 ? "בוקר טוב" : h < 17 ? "צהריים טובים" : h < 21 ? "ערב טוב" : "לילה טוב";
+    const name = account && account.username && account.username !== GUEST_NAME ? `, ${account.username}` : "";
+    return `${part}${name} 👋`;
+  }
+
+  function initials(name) {
+    return (String(name || "").trim()[0] || "?").toUpperCase();
+  }
+
+  function renderHome() {
+    $.homeHello.textContent = greeting();
+    $.homeAvatarBtn.textContent = account ? initials(account.username) : "🧑";
+
+    // Active list hero
+    $.homeListName.textContent = "🛒 " + (account ? activeListName() : "רשימת קניות");
+    $.homeListChev.classList.toggle("hidden", !account);
+    const total = items.length;
+    const remaining = items.filter((i) => !i.bought).length;
+    const pct = total ? Math.round(((total - remaining) / total) * 100) : 0;
+    $.homeRingFill.style.strokeDasharray = `${pct} 100`;
+    $.homeRingText.textContent = `${pct}%`;
+    if (!total) {
+      $.homeRemaining.textContent = "הרשימה ריקה";
+      $.homeProgressSub.textContent = "הוסיפו פריטים — בהקלדה, בקול או מה-AI Chef";
+      $.startShoppingText.textContent = "פתיחת הרשימה";
+    } else if (!remaining) {
+      $.homeRemaining.textContent = "הכל נקנה! 🎉";
+      $.homeProgressSub.textContent = `${total} פריטים סומנו`;
+      $.startShoppingText.textContent = "לרשימת הקניות";
+    } else {
+      $.homeRemaining.textContent = `${remaining} פריטים לקנייה`;
+      $.homeProgressSub.textContent = total - remaining ? `${total - remaining} מתוך ${total} כבר בעגלה` : `${total} פריטים ברשימה`;
+      $.startShoppingText.textContent = total - remaining ? "המשך לקנות" : "התחילו לקנות";
+    }
+    $.homePreview.innerHTML = "";
+    const open = items.filter((i) => !i.bought);
+    open.slice(0, 5).forEach((i) => {
+      const chip = document.createElement("span");
+      chip.className = "preview-chip";
+      chip.textContent = `${Categories.emojiFor(i.name, i.category)} ${i.name}`;
+      $.homePreview.appendChild(chip);
+    });
+    if (open.length > 5) {
+      const more = document.createElement("span");
+      more.className = "preview-chip more";
+      more.textContent = `+${open.length - 5}`;
+      $.homePreview.appendChild(more);
+    }
+    $.homePreview.classList.toggle("hidden", !open.length);
+
+    // Family sharing
+    const members = account && listInfo ? listInfo.members : [];
+    $.memberStack.innerHTML = "";
+    members.slice(0, 4).forEach((m) => {
+      const a = document.createElement("span");
+      a.className = "member-dot" + (m.userId === (account && account.userId) ? " me" : "");
+      a.textContent = initials(m.username);
+      a.title = m.username;
+      $.memberStack.appendChild(a);
+    });
+    if (members.length > 4) {
+      const more = document.createElement("span");
+      more.className = "member-dot more";
+      more.textContent = `+${members.length - 4}`;
+      $.memberStack.appendChild(more);
+    }
+    $.familyText.textContent = !BACKEND_URL
+      ? "שיתוף זמין כשהאפליקציה מחוברת לשרת"
+      : !account
+        ? "צרו חשבון (רק שם) ושתפו את הרשימה עם בני הבית"
+        : members.length > 1
+          ? `${sharingText()} · ${members.filter((m) => m.userId !== account.userId).map((m) => m.username).slice(0, 3).join(", ")}`
+          : "רק את/ה ברשימה — הזמינו את בני הבית";
+    $.homeInviteBtn.classList.toggle("hidden", !BACKEND_URL);
+    $.homeMembersBtn.classList.toggle("hidden", !account);
+
+    // Every list, one tap into shopping
+    const showLists = !!account && lists.length > 1;
+    $.homeListsSection.classList.toggle("hidden", !showLists);
+    $.homeNewListBtn.classList.toggle("hidden", !account);
+    if (showLists) {
+      $.homeLists.innerHTML = "";
+      lists.forEach((l) => {
+        const isActive = l.listId === activeListId;
+        const left = isActive ? remaining : l.remaining || 0;
+        const row = document.createElement("button");
+        row.className = "row row-btn" + (isActive ? " active" : "");
+        const icon = document.createElement("span");
+        icon.className = "row-icon";
+        icon.textContent = l.memberCount > 1 ? "👥" : "📋";
+        const main = document.createElement("div");
+        main.className = "row-main";
+        const title = document.createElement("div");
+        title.className = "row-title";
+        title.textContent = listDisplayName(isActive ? { ...l, name: (listInfo && listInfo.name) || l.name } : l);
+        const sub = document.createElement("div");
+        sub.className = "row-sub";
+        sub.textContent = left ? `${left} לקנייה` : "אין פריטים פתוחים";
+        main.append(title, sub);
+        const chev = document.createElement("span");
+        chev.className = "row-chev";
+        chev.textContent = "‹";
+        row.append(icon, main, chev);
+        row.addEventListener("click", () => {
+          switchList(l.listId);
+          openShop();
+        });
+        $.homeLists.appendChild(row);
+      });
+    }
+  }
+
+  CHEF_PROMPTS.forEach((prompt) => {
+    const chip = document.createElement("button");
+    chip.className = "chip ai-chip";
+    chip.textContent = prompt;
+    chip.addEventListener("click", () => {
+      if (!account) {
+        openWelcome("צרו חשבון כדי להשתמש ב-AI Chef. הפריטים שכבר ברשימה יישמרו.");
+        return;
+      }
+      switchTab("ai");
+      AIChat.ask(prompt);
+    });
+    $.chefPrompts.appendChild(chip);
+  });
 
   /* ---------- Lists sheet ---------- */
   function renderListsSheet() {
@@ -1725,6 +1918,7 @@
       btn.addEventListener("click", () => {
         switchList(l.listId);
         closeSheet($.listsOverlay);
+        if (activeTab === "home") openShop();
       });
       $.listsList.appendChild(btn);
     });
@@ -1869,10 +2063,10 @@
     haptic([15]);
     let code = inviteCodes.get(activeListId);
     if (!code) {
-      $.togetherBtn.classList.add("loading");
+      $.homeInviteBtn.classList.add("loading");
       if (syncStatus !== "online") showToast("השרת מתעורר, מכינים קישור הזמנה…", 8000);
       code = await (prefetchInviteCode() || loadInviteCode());
-      $.togetherBtn.classList.remove("loading");
+      $.homeInviteBtn.classList.remove("loading");
       if (!code) {
         showToast("כדי ליצור קישור הזמנה צריך חיבור לשרת. נסו שוב בעוד רגע.", 3500);
         return;
@@ -1973,7 +2167,7 @@
 
   function deleteList() {
     if (lists.length <= 1) {
-      showToast("זו הרשימה היחידה שלך. אפשר לאפס אותה עם 🗑️ למעלה.", 3500);
+      showToast("זו הרשימה היחידה שלך. אפשר לאפס אותה מתפריט ⋮ ברשימה.", 3500);
       return;
     }
     const others = isSharedList() ? " היא תימחק גם אצל כל המשתתפים." : "";
@@ -2005,7 +2199,7 @@
       sync.clearQueue();
       sync = null;
     }
-    lists.forEach((l) => removeKey(STORAGE_KEYS.listCachePrefix + l.listId));
+    lists.forEach((l) => LocalDB.remove(listCacheKey(l.listId)));
     [STORAGE_KEYS.account, STORAGE_KEYS.lists, STORAGE_KEYS.activeList, STORAGE_KEYS.adminSession].forEach(removeKey);
     account = null;
     lists = [];
@@ -2510,7 +2704,14 @@
     render();
   });
 
-  $.resetAllBtn.addEventListener("click", resetAll);
+  // Shopping view chrome
+  $.shopBackBtn.addEventListener("click", leaveShop);
+  $.shopMenuBtn.addEventListener("click", () => openSheet($.shopMenuOverlay));
+  wireSheet($.shopMenuOverlay, $.closeShopMenuBtn);
+  // Each option closes the menu first, then opens its own sheet or confirm.
+  const fromMenu = (fn) => () => { closeSheet($.shopMenuOverlay); fn(); };
+  $.resetAllBtn.addEventListener("click", fromMenu(resetAll));
+  $.menuClearBtn.addEventListener("click", fromMenu(clearBought));
 
   // Layout
   $.layoutToggleBtn.addEventListener("click", () => {
@@ -2518,7 +2719,7 @@
     showToast(viewMode === "store" ? "🧭 מסודר לפי המעברים בסופר" : "📋 תצוגת רשימה רגילה");
   });
   const openOrder = () => { renderOrderList(); openSheet($.orderOverlay); };
-  $.orderBtn.addEventListener("click", openOrder);
+  $.menuOrderBtn.addEventListener("click", fromMenu(openOrder));
   wireSheet($.orderOverlay, $.closeOrderBtn);
   $.resetOrderBtn.addEventListener("click", () => {
     storeOrder = Categories.DEFAULT_STORE_ORDER.slice();
@@ -2556,7 +2757,7 @@
     renderTemplatesList();
     openSheet($.templatesOverlay);
   };
-  $.templatesBtn.addEventListener("click", openTemplates);
+  $.menuTemplatesBtn.addEventListener("click", fromMenu(openTemplates));
   wireSheet($.templatesOverlay, $.closeTemplatesBtn);
   $.saveTemplateBtn.addEventListener("click", saveCurrentAsTemplate);
 
@@ -2575,11 +2776,30 @@
   });
 
   // Share & account
-  $.membersBtn.addEventListener("click", openAccountModal);
+  $.menuMembersBtn.addEventListener("click", fromMenu(openAccountModal));
+  $.menuShareBtn.addEventListener("click", fromMenu(makeListTogether));
   wireSheet($.accountOverlay, $.closeAccountBtn);
   $.saveListNameBtn.addEventListener("click", saveListName);
   $.listNameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") saveListName(); });
-  $.togetherBtn.addEventListener("click", makeListTogether);
+
+  // Home dashboard
+  $.startShoppingBtn.addEventListener("click", () => { haptic([12]); openShop(); });
+  $.homeListBtn.addEventListener("click", () => (account ? openListsSheet() : openShop()));
+  $.homeConnPill.addEventListener("click", () => {
+    showToast($.homeConnPill.title, 3500);
+    if (sync) sync.kick();
+  });
+  $.homeAvatarBtn.addEventListener("click", () => switchTab("profile"));
+  $.homeInviteBtn.addEventListener("click", makeListTogether);
+  $.homeMembersBtn.addEventListener("click", openAccountModal);
+  $.homeChefBtn.addEventListener("click", () => switchTab("ai"));
+  $.homeFridgeBtn.addEventListener("click", () => openFridgeVision());
+  $.homeTemplatesBtn.addEventListener("click", () => openTemplates());
+  $.homeOrderBtn.addEventListener("click", () => openOrder());
+  $.homeNewListBtn.addEventListener("click", () => {
+    openListsSheet();
+    setTimeout(() => $.newListInput.focus(), 50);
+  });
   wireSheet($.shareFallbackOverlay, $.closeShareFallbackBtn);
   [$.shareWhatsappLink, $.shareSmsLink].forEach((a) => a.addEventListener("click", () => {
     setTimeout(() => closeSheet($.shareFallbackOverlay), 300);
@@ -2644,7 +2864,8 @@
       const open = Array.from(document.querySelectorAll(".modal-overlay")).reverse().find(isOpen);
       if (open === $.welcomeOverlay) closeWelcome();
       else if (open) open.click(); // every other sheet closes on a backdrop click
-      else if (activeTab !== "lists") switchTab("lists");
+      else if (activeTab === "lists") leaveShop();
+      else if (activeTab !== "home") switchTab("home");
       else appPlugin.exitApp();
     });
   }
@@ -2701,48 +2922,75 @@
   $.fridgeCameraInput.addEventListener("change", () => onFridgePhoto($.fridgeCameraInput));
   $.fridgeUploadInput.addEventListener("change", () => onFridgePhoto($.fridgeUploadInput));
 
-  /* ---------- Init ---------- */
-  takeLinkParamsFromUrl();
-  loadState();
-  applyTheme(document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark");
-  QuickAdd.seed(items, historyKey());
-  AIChat.init({
-    backendUrl: BACKEND_URL,
-    getToken: () => (account ? account.token : null),
-    getListNames: () => items.filter((i) => !i.bought).map((i) => i.name),
-    isInList: (name) => !!findOpen(name),
-    // Prefer this device's own categorizer (it knows the user's corrections); the model's guess fills gaps.
-    addItem: (spec) => !!addNamed({
-      name: spec.name,
-      quantity: spec.quantity || "",
-      category: Categories.categorize(spec.name) === "misc" && Categories.MAP[spec.category] ? spec.category : undefined,
-    }),
-    showToast,
-    onNeedAccount: () => openWelcome("צרו חשבון כדי להשתמש בעוזר החכם ולסנכרן את הרשימות. הפריטים שכבר ברשימה יישמרו."),
-  });
-  $.appVersion.textContent = `רשימת קניות ${(window.APP_CONFIG && window.APP_CONFIG.APP_VERSION) || ""}${Native.isApp ? " · Android" : ""}`;
-  setViewMode(viewMode);
-  renderAccountUI();
-  renderNotifySetting();
-  setupVoice();
+  /* ---------- Init ----------
+   * LocalDB loads the device's lists and outbox from IndexedDB into memory first
+   * (typically a few milliseconds); from then on every read is synchronous.
+   */
+  function boot() {
+    takeLinkParamsFromUrl();
+    loadState();
+    applyTheme(document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark");
+    QuickAdd.seed(items, historyKey());
+    AIChat.init({
+      backendUrl: BACKEND_URL,
+      getToken: () => (account ? account.token : null),
+      getListNames: () => items.filter((i) => !i.bought).map((i) => i.name),
+      isInList: (name) => !!findOpen(name),
+      // Prefer this device's own categorizer (it knows the user's corrections); the model's guess fills gaps.
+      addItem: (spec) => !!addNamed({
+        name: spec.name,
+        quantity: spec.quantity || "",
+        category: Categories.categorize(spec.name) === "misc" && Categories.MAP[spec.category] ? spec.category : undefined,
+      }),
+      showToast,
+      onNeedAccount: () => openWelcome("צרו חשבון כדי להשתמש בעוזר החכם ולסנכרן את הרשימות. הפריטים שכבר ברשימה יישמרו."),
+    });
+    $.appVersion.textContent = `רשימת קניות ${(window.APP_CONFIG && window.APP_CONFIG.APP_VERSION) || ""}${Native.isApp ? " · Android" : ""}`;
+    setViewMode(viewMode);
+    renderAccountUI();
+    renderNotifySetting();
+    setupVoice();
 
-  const hasInvite = BACKEND_URL && !!readJSON(STORAGE_KEYS.pendingJoin, null);
-  if (account) {
-    sync = startSync();
-    sync.start();
-    if (pendingPair) showToast("המכשיר הזה כבר מחובר לחשבון ✓", 3500);
-    else if (hasInvite) showToast("מצטרפים לרשימה המשותפת…", 8000);
-  } else if (pendingPair) {
-    // Opened a ?pair=CODE link from a signed-in device: connect without typing.
-    openWelcome("מחברים את המכשיר לחשבון שלכם…", "link");
-    $.linkCodeInput.value = pendingPair;
-    linkDevice(pendingPair);
-  } else if (hasInvite) {
-    joinAsNewUser();
-  } else if (BACKEND_URL && !readJSON(STORAGE_KEYS.welcomeSeen, false)) {
-    openWelcome();
+    const hasInvite = BACKEND_URL && !!readJSON(STORAGE_KEYS.pendingJoin, null);
+    if (account) {
+      sync = startSync();
+      sync.start();
+      if (pendingPair) showToast("המכשיר הזה כבר מחובר לחשבון ✓", 3500);
+      else if (hasInvite) showToast("מצטרפים לרשימה המשותפת…", 8000);
+    } else if (pendingPair) {
+      // Opened a ?pair=CODE link from a signed-in device: connect without typing.
+      openWelcome("מחברים את המכשיר לחשבון שלכם…", "link");
+      $.linkCodeInput.value = pendingPair;
+      linkDevice(pendingPair);
+    } else if (hasInvite) {
+      joinAsNewUser();
+    } else if (BACKEND_URL && !readJSON(STORAGE_KEYS.welcomeSeen, false)) {
+      openWelcome();
+    }
+
+    // Back in the supermarket after the phone killed the app: reopen the list, not the dashboard.
+    const lastView = readJSON(STORAGE_KEYS.lastView, null);
+    if (lastView && lastView.view === "lists" && Date.now() - lastView.at < LAST_VIEW_TTL_MS && !hasInvite && !pendingPair) openShop();
+    else renderHome();
+
+    // The Android app ships its files inside the APK; updates come from the store, not a service worker.
+    if (window.PWAUpdate && !Native.isApp) window.PWAUpdate.register("sw.js");
+    requestPersistentStorage();
   }
 
-  // The Android app ships its files inside the APK; updates come from the store, not a service worker.
-  if (window.PWAUpdate && !Native.isApp) window.PWAUpdate.register("sw.js");
+  window.addEventListener("pwa:offline-ready", () => {
+    toast({ text: "האפליקציה שמורה במכשיר — עובדת גם בלי קליטה בסופר", icon: "📶", ms: 4000 });
+  });
+
+  /*
+   * Ask the browser not to evict the offline copy under storage pressure. Only for the
+   * installed PWA: Chrome grants it silently there, and other browsers might prompt.
+   */
+  function requestPersistentStorage() {
+    const standalone = window.matchMedia && window.matchMedia("(display-mode: standalone)").matches;
+    if (!standalone || Native.isApp || !navigator.storage || !navigator.storage.persist) return;
+    navigator.storage.persisted().then((yes) => yes || navigator.storage.persist()).catch(() => {});
+  }
+
+  LocalDB.ready.then(boot, boot);
 })();

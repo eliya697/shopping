@@ -10,7 +10,7 @@ An offline-first shopping list (Hebrew, RTL, dark Listonic-style UI) with multip
 
 | | |
 |---|---|
-| **Three tabs** | Bottom navigation: 📋 *Lists*, ✦ *AI assistant*, 👤 *Profile / settings* (account, sync status, theme, templates, aisle order, device linking). Dark theme by default, light theme in Profile. |
+| **Dashboard + shopping view** | The app opens on a **dashboard** (🏠): the active list with a progress ring and a big *המשך לקנות* button, family sharing (members, invite), AI Chef shortcuts, and all your lists. The **shopping view** is a distraction-free full-screen mode: a one-row header (back, list name, sync dot, ⋮ options), search + aisle toggle, the list, and the add bar on the bottom edge. Templates, aisle order, members, clear and reset live in the ⋮ sheet. Back gesture / Android back returns to the dashboard; reopening the app within 30 minutes of shopping goes straight back to the list. The floating dock has 🏠 *Home*, ✦ *AI Chef* and 👤 *Profile*. |
 | **AI assistant** | Chat with Gemini about meals, recipes, what's in season, budget shopping. Suggested products come back as cards with **הוסף לרשימה** per item and **הוסף הכל** per recipe. Quick-prompt chips, voice questions, and the open items on your list are sent as context so it doesn't suggest what you already have. Signed-in users only. |
 | **Item icons** | Every item gets an emoji from its name (“חלב” → 🥛, “לחם” → 🍞, “עגבניה” → 🍅), falling back to its section's icon. |
 | **Checked items drawer** | Checked items collapse into a *פריטים שסומנו (n)* drawer at the bottom of the list, with a 🧹 clear button. A search always shows its checked matches. |
@@ -21,7 +21,7 @@ An offline-first shopping list (Hebrew, RTL, dark Listonic-style UI) with multip
 | **Smart categories** | 11 supermarket sections, auto-detected from the name. The head noun wins (“מיץ תפוזים” → drinks), and corrections you make are remembered. |
 | **Store layout** | 🧭 toggle groups the list by aisle along a walking path: produce first, chilled and frozen last so they stay cold. ⚙️ reorders the aisles for your store. |
 | **Quick add** | Chips above the input while typing, plus a ⚡ drawer. Ranked by how often and how recently you added each item, favoring items from the current list. |
-| **Offline-first** | Every change is queued locally and replayed on reconnect. The header pill shows *מחובר* / *מסנכרן 3…* / *לא מקוון · 3 ממתינים*. |
+| **Offline-first** | Lists and the outbox live in **IndexedDB** (`local-db.js`): read from memory, written in one batched transaction after the frame that shows the change, so checking an item off is instant. Every change is queued and replayed on reconnect; the queue folds redundant ops (check/uncheck, add-then-delete, repeated edits) so a long offline stretch replays fast. The service worker precaches the whole app shell, so it opens with no reception at all. The header shows *מחובר* / *מסנכרן 3…* / *לא מקוון · 3 ממתינים*. |
 | **Voice** | 🎤 → “תוסיף שני קילו עגבניות, חלב ונייר טואלט” → three items (with “2 ק״ג”), with an **undo** button. |
 
 Typed input understands quantities too: `2 חלב`, `חלב x2`, `חצי קילו גבינה`, and comma-separated lists.
@@ -30,9 +30,10 @@ Typed input understands quantities too: `2 חלב`, `חלב x2`, `חצי קיל�
 
 ```
 shop app/
-├── index.html              # UI: Lists / AI / Profile tabs, bottom nav, sheets, update banner
+├── index.html              # UI: dashboard, shopping view, AI / Profile tabs, dock, sheets, update banner
 ├── style.css               # glassmorphism design system: dark (default) + light tokens
-├── app.js                  # state, rendering (keyed DOM patching), actions, sync wiring, tabs
+├── app.js                  # state, rendering (keyed DOM patching), actions, sync wiring, dashboard + views
+├── local-db.js             # IndexedDB key-value store (memory-first reads, batched writes, localStorage fallback)
 ├── ai-chat.js              # AI assistant tab: chat UI, cold-start-aware /api/ai/chat client, "add to list" cards
 ├── join/index.html         # invite deep link (…/join/?code=X) -> app with ?join=X
 ├── categories.js           # supermarket sections, auto-categorize, item emojis, default walking order

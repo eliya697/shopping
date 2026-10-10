@@ -17,6 +17,7 @@ const APP_SHELL = [
   "./style.css",
   "./app.js",
   "./config.js",
+  "./local-db.js",
   "./categories.js",
   "./item-parser.js",
   "./quick-add.js",
@@ -119,12 +120,20 @@ self.addEventListener("fetch", (event) => {
   }
 
   // App navigations: serve the precached shell (versioned together with the JS/CSS).
+  // It never waits on the network, so the app opens instantly even with one bar of
+  // reception in the supermarket.
   if (request.mode === "navigate") {
     event.respondWith((async () => {
       const cache = await caches.open(CACHE_NAME);
       const cached = await cache.match("./index.html");
       if (cached) return cached;
-      return fetch(request);
+      try {
+        return await fetch(request);
+      } catch (e) {
+        // Our cache was evicted under storage pressure: any other cached shell
+        // still beats the browser's offline page.
+        return (await caches.match("./index.html", { ignoreSearch: true })) || offlinePage();
+      }
     })());
     return;
   }
@@ -132,8 +141,10 @@ self.addEventListener("fetch", (event) => {
   // App-shell assets: cache-first. Anything else same-origin: stale-while-revalidate.
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_NAME);
-    const cached = await cache.match(request, { ignoreSearch: true });
     const isShell = APP_SHELL.some((p) => new URL(p, self.location).pathname === url.pathname);
+    // Fall back to an older version's copy when this one is missing (partial eviction).
+    const cached = (await cache.match(request, { ignoreSearch: true }))
+      || (isShell ? await caches.match(request, { ignoreSearch: true }) : undefined);
     if (cached && isShell) return cached;
 
     const network = fetch(request)
@@ -150,3 +161,16 @@ self.addEventListener("fetch", (event) => {
     return network;
   })());
 });
+
+/* Last resort when there's no network and no cached shell at all (should be rare). */
+function offlinePage() {
+  const html = '<!doctype html><html lang="he" dir="rtl"><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width, initial-scale=1">'
+    + '<title>אין חיבור</title><body style="margin:0;min-height:100vh;display:flex;align-items:center;'
+    + 'justify-content:center;background:#0f172a;color:#e8eef7;font-family:system-ui,sans-serif;text-align:center;padding:24px">'
+    + '<div><div style="font-size:3rem">📡</div><h1 style="font-size:1.2rem">אין חיבור לאינטרנט</h1>'
+    + '<p style="color:#94a3b8">הרשימה תיפתח ברגע שהחיבור יחזור.</p>'
+    + '<button onclick="location.reload()" style="margin-top:8px;padding:12px 20px;border:0;border-radius:14px;'
+    + 'background:#00e676;color:#04210f;font-weight:800;font-size:1rem">נסו שוב</button></div>';
+  return new Response(html, { status: 503, headers: { "Content-Type": "text/html; charset=utf-8" } });
+}

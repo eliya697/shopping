@@ -66,7 +66,13 @@
   async function register(scriptUrl = "sw.js") {
     if (!("serviceWorker" in navigator)) return null;
 
+    let firstInstall = !navigator.serviceWorker.controller;
     navigator.serviceWorker.addEventListener("controllerchange", () => {
+      // First install finished: the whole app is cached and now opens without a network.
+      if (firstInstall) {
+        firstInstall = false;
+        global.dispatchEvent(new CustomEvent("pwa:offline-ready"));
+      }
       // Only reload when *this* tab asked for it. Also fires on first install
       // (clients.claim) and when another tab updated; don't yank the page then.
       if (!reloadRequested) {
