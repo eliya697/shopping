@@ -93,7 +93,8 @@ Because the database only has the token's hash, the code carries the signed-in d
 
 ### Data model (SQLite dialect, stored in Turso)
 
-- `users(user_id, username, token_hash, created_at, last_seen_at)`
+- `users(user_id, username, token_hash, created_at, last_seen_at, email)` — `email` is set only by the owner claim
+- `user_tokens(token_hash, user_id, created_at)` — extra device tokens of an account, filled when one account is merged into another (owner recovery)
 - `lists(list_id, owner_id, name, share_code, created_at)`
 - `list_members(list_id, user_id, joined_at)` is the members array, stored as a join table
 - `items(item_id, list_id, text, category, quantity, notes, is_completed, added_by, created_at, updated_at)`
@@ -174,7 +175,11 @@ A device that already has items never loses them to an empty server answer. If t
 
 #### Roles (RBAC)
 
-There are two roles: `owner` (בעלים) and `user` (חבר). An account is the owner only when its **verified** email equals `ADMIN_EMAIL` (default `eliyamistriel1234@gmail.com`). Accounts are name-only, with no passwords, so an email is never accepted from user input alone. It is stored on an account only by `POST /api/admin/claim-owner`, which also requires `ADMIN_SECRET_KEY`. At most one account holds it: claiming from another account moves the role. Every user object the server returns carries `role` and `isAdmin`, but never the email.
+There are two roles: `owner` (בעלים) and `user` (חבר). An account is the owner only when its **verified** email equals `ADMIN_EMAIL` (default `eliyamistriel1234@gmail.com`). Accounts are name-only, with no passwords, so an email is never accepted from user input alone. It is stored on an account only by `POST /api/admin/claim-owner`, which also requires `ADMIN_SECRET_KEY`. Emails are compared trimmed and case-insensitively everywhere. Every user object the server returns carries `role` and `isAdmin`, but never the email.
+
+**Sessions never expire on the server.** An app account is a random token kept in the device's storage. "Getting logged out" means the device lost that storage: browser eviction, iPhone Safari's 7-day limit for sites not added to the home screen, "clear site data", or opening a link in a different browser. The device then starts over on a new account. The app reduces this by requesting persistent storage (`navigator.storage.persist()`) and by telling iPhone Safari users to add the app to the home screen.
+
+**Owner recovery.** If the owner account still exists when `claim-owner` is called from a *different* account, that account is **merged into** the owner account instead of the role moving onto it. Its lists, memberships and items move over, its auto-created empty list is dropped, and its device tokens become tokens of the owner account (stored in `user_tokens`), so the device stays signed in, now as the original owner with their lists and list ownership. Without this, the role used to move onto the new, empty account while the original lists stayed owned by an account nobody could reach. For an account lost *before* this existed, the dashboard's users table has **מיזוג לבעלים** (`POST /api/admin/users/:id/merge`), which folds the old account into the current owner account.
 
 In the app, tap the version line at the bottom of Profile 5 times to open *כניסת בעלים*. The owner sees a gold *בעלים* badge and a *כלי בעלים* section; everyone else sees *חבר* and no admin UI at all.
 
@@ -183,7 +188,8 @@ Every `/api/admin/*` route except `check`, `login` and `claim-owner` is behind `
 | Endpoint | |
 |---|---|
 | `POST /api/admin/login` | `{ email, secretKey }` → `{ token, expiresAt }` |
-| `POST /api/admin/claim-owner` | app account token + `{ email, secretKey }` → `{ user, session }`; makes that account the owner |
+| `POST /api/admin/claim-owner` | app account token + `{ email, secretKey }` → `{ user, session, recovered }`; makes that account the owner, or merges it into the existing owner account (`recovered: true`, plus `lists`) |
+| `POST /api/admin/users/:id/merge` | `{ intoUserId? }` (default: the owner account) → folds that account into the target; its devices stay signed in as the target |
 | `POST /api/admin/session` | owner account token → a fresh dashboard session (used by Profile → לוח ניהול) |
 | `GET /api/admin/health` | uptime, memory, active sockets, DB status/latency/size/counts |
 | `GET /api/admin/users` · `DELETE /api/admin/users/:id` | users with last activity and list ids; deleting removes their owned lists and memberships and disconnects them |

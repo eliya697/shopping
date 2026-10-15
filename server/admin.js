@@ -7,7 +7,9 @@
  * ADMIN_SECRET_KEY environment variable. Returns a signed session token (12h).
  *
  * Owner account: POST /api/admin/claim-owner { email, secretKey } with an app
- * account's token marks that account as the owner (role "owner", see roles.js).
+ * account's token marks that account as the owner (role "owner", see roles.js) —
+ * or, if a different owner account already exists, merges the caller into it
+ * (account recovery after a device lost its storage).
  *
  * Every other route is behind server.js's requireAdmin middleware: an admin
  * session token or the owner account's token passes, a regular account gets 403.
@@ -157,9 +159,16 @@ function adminRouter(sockets, requireAdmin) {
   });
 
   /*
-   * Link the calling app account (Bearer <account token>) to the owner email. The
-   * secret key is the proof of identity: accounts have no passwords, so typing the
-   * email alone must never be enough. Any other account holding the email loses it.
+   * Owner sign-in from the app (Bearer <account token>). The secret key is the proof
+   * of identity: accounts have no passwords, so typing the email alone is never enough.
+   *
+   * Recovery: app accounts live only in the device's storage. When that storage is
+   * lost (browser eviction, iOS's 7-day limit, "clear data", a different browser),
+   * the device ends up on a fresh, empty account. If the owner account still exists,
+   * proving the owner credentials from that device folds the fresh account into it,
+   * so the owner gets their original lists and list ownership back — rather than the
+   * owner role moving onto an empty account and the real lists being orphaned.
+   * The device keeps its token, which from now on signs in as the owner account.
    */
   router.post("/claim-owner", handle(async (req, res) => {
     if (loginBlocked(req.ip)) return res.status(429).json({ error: "too many attempts, try again later" });
@@ -171,9 +180,24 @@ function adminRouter(sockets, requireAdmin) {
       return res.status(401).json({ error: "invalid credentials" });
     }
     loginFails.delete(req.ip);
+
+    const existing = await store.findUserByEmail(ADMIN_EMAIL);
+    if (existing && existing.userId !== user.userId) {
+      const merged = await store.mergeAccounts(user.userId, existing.userId);
+      if (merged) {
+        console.log(`[admin] owner recovered: account ${user.userId} merged into owner ${existing.userId}`);
+        await sockets.accountMerged(merged);
+        return res.json({
+          user: merged.into,
+          recovered: true,
+          lists: await store.getListsForUser(merged.into.userId),
+          session: issueToken(),
+        });
+      }
+    }
     const owner = await store.setVerifiedEmail(user.userId, ADMIN_EMAIL);
     console.log(`[admin] account ${user.userId} is now the owner`);
-    res.json({ user: owner, session: issueToken() });
+    res.json({ user: owner, recovered: false, session: issueToken() });
   }));
 
   /* Everything below: owner or admin session only (401 without credentials, 403 for regular users). */
@@ -222,6 +246,26 @@ function adminRouter(sockets, requireAdmin) {
     if (!result) return res.status(404).json({ error: "user not found" });
     await sockets.userDeleted(result);
     res.json({ ok: true, deletedLists: result.deletedLists.length, leftLists: result.leftLists.length });
+  }));
+
+  /*
+   * Repair tool: fold an account into the owner account (or `intoUserId`). For an owner
+   * who already lost their device's account before automatic recovery existed: their
+   * old account still owns the lists; merging it into the current owner account
+   * returns the lists and their ownership. Tokens of the merged account keep working.
+   */
+  router.post("/users/:id/merge", handle(async (req, res) => {
+    if (!ID_RE.test(req.params.id)) return res.status(400).json({ error: "invalid user id" });
+    const target = req.body && req.body.intoUserId
+      ? await store.findUserById(String(req.body.intoUserId))
+      : await store.findUserByEmail(ADMIN_EMAIL);
+    if (!target) return res.status(404).json({ error: "target account not found (no owner account yet?)", code: "NO_TARGET" });
+    if (target.userId === req.params.id) return res.status(400).json({ error: "cannot merge an account into itself" });
+    const merged = await store.mergeAccounts(req.params.id, target.userId);
+    if (!merged) return res.status(404).json({ error: "user not found" });
+    await sockets.accountMerged(merged);
+    console.log(`[admin] merged account ${req.params.id} into ${target.userId}`);
+    res.json({ ok: true, into: merged.into, lists: merged.touchedLists.length, droppedEmptyLists: merged.droppedLists.length });
   }));
 
   router.get("/lists", handle(async (_req, res) => {

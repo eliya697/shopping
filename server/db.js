@@ -77,6 +77,17 @@ const SCHEMA = [
     updated_at   INTEGER NOT NULL
   )`,
   "CREATE INDEX IF NOT EXISTS idx_items_list ON items(list_id)",
+  /*
+   * Extra device tokens of an account, besides users.token_hash. Filled when one
+   * account is merged into another (owner recovery): the merged account's tokens
+   * keep working and now sign in as the surviving account.
+   */
+  `CREATE TABLE IF NOT EXISTS user_tokens (
+    token_hash  TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    created_at  INTEGER NOT NULL
+  )`,
+  "CREATE INDEX IF NOT EXISTS idx_user_tokens_user ON user_tokens(user_id)",
 ];
 
 async function columnsOf(table) {
@@ -214,10 +225,28 @@ async function createUser(username) {
  */
 async function findUserByToken(token) {
   if (!token) return null;
-  return toUser(await get("SELECT user_id, username, created_at, email FROM users WHERE token_hash = ?", [hashToken(token)]));
+  const hash = hashToken(token);
+  return toUser(await get(`
+    SELECT user_id, username, created_at, email FROM users WHERE token_hash = ?
+    UNION ALL
+    SELECT u.user_id, u.username, u.created_at, u.email
+      FROM user_tokens t JOIN users u ON u.user_id = t.user_id
+     WHERE t.token_hash = ?
+    LIMIT 1`, [hash, hash]));
 }
 const findUserById = async (userId) =>
   toUser(await get("SELECT user_id, username, created_at, email FROM users WHERE user_id = ?", [userId]));
+
+/* Emails are compared trimmed and case-insensitively everywhere (rows from older versions may not be normalized). */
+const EMAIL_MATCH = "email IS NOT NULL AND lower(trim(email)) = ?";
+
+/* The account currently holding this verified email (most recently active one if, from older data, several do). */
+const findUserByEmail = async (email) =>
+  toUser(await get(
+    `SELECT user_id, username, created_at, email FROM users WHERE ${EMAIL_MATCH}
+     ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT 1`,
+    [normalizeEmail(email)]
+  ));
 
 /*
  * Attach a verified email to an account, taking it off any other account first, so
@@ -226,10 +255,54 @@ const findUserById = async (userId) =>
 async function setVerifiedEmail(userId, email) {
   const clean = normalizeEmail(email);
   const [, updated] = await writeBatch([
-    q("UPDATE users SET email = NULL WHERE email = ? AND user_id <> ?", [clean, userId]),
+    q(`UPDATE users SET email = NULL WHERE ${EMAIL_MATCH} AND user_id <> ?`, [clean, userId]),
     q("UPDATE users SET email = ? WHERE user_id = ?", [clean, userId]),
   ]);
   return updated.rowsAffected > 0 ? findUserById(userId) : null;
+}
+
+/*
+ * Folds account `fromId` into `intoId`, atomically:
+ *   - every device token of `from` becomes a token of `into` (no device is signed out;
+ *     it simply is `into` from its next request on),
+ *   - lists `from` owns change owner, its memberships move over, its items' "added by" too,
+ *   - its auto-created empty list (no items, no other members) is dropped instead of kept,
+ *   - the `from` account is deleted.
+ * `into` keeps its own role/email. Returns what changed (for socket notifications), or null.
+ */
+async function mergeAccounts(fromId, intoId) {
+  if (!fromId || !intoId || fromId === intoId) return null;
+  const [from, into] = await Promise.all([findUserById(fromId), findUserById(intoId)]);
+  if (!from || !into) return null;
+
+  const [ownedRes, memberRes] = await readBatch([
+    q(`SELECT l.list_id,
+              (SELECT COUNT(*) FROM items i WHERE i.list_id = l.list_id) AS item_count,
+              (SELECT COUNT(*) FROM list_members m WHERE m.list_id = l.list_id) AS member_count
+         FROM lists l WHERE l.owner_id = ?`, [fromId]),
+    q("SELECT list_id FROM list_members WHERE user_id = ?", [fromId]),
+  ]);
+  const emptySolo = ownedRes.rows
+    .filter((r) => Number(r.item_count) === 0 && Number(r.member_count) <= 1)
+    .map((r) => r.list_id);
+  const movedLists = ownedRes.rows.map((r) => r.list_id).filter((id) => !emptySolo.includes(id));
+  const touched = [...new Set([...memberRes.rows.map((r) => r.list_id), ...movedLists])].filter((id) => !emptySolo.includes(id));
+  const now = Date.now();
+
+  await writeBatch([
+    ...emptySolo.flatMap(deleteListStmts),
+    q("INSERT OR IGNORE INTO user_tokens (token_hash, user_id, created_at) SELECT token_hash, ?, ? FROM users WHERE user_id = ?",
+      [intoId, now, fromId]),
+    q("UPDATE user_tokens SET user_id = ? WHERE user_id = ?", [intoId, fromId]),
+    q("UPDATE lists SET owner_id = ? WHERE owner_id = ?", [intoId, fromId]),
+    q("INSERT OR IGNORE INTO list_members (list_id, user_id, joined_at) SELECT list_id, ?, joined_at FROM list_members WHERE user_id = ?",
+      [intoId, fromId]),
+    q("DELETE FROM list_members WHERE user_id = ?", [fromId]),
+    q("UPDATE items SET added_by = ? WHERE added_by = ?", [intoId, fromId]),
+    q("UPDATE users SET last_seen_at = ? WHERE user_id = ?", [now, intoId]),
+    q("DELETE FROM users WHERE user_id = ?", [fromId]),
+  ]);
+  return { from, into: await findUserById(intoId), touchedLists: touched, droppedLists: emptySolo };
 }
 const renameUser = (userId, username) => run("UPDATE users SET username = ? WHERE user_id = ?", [username, userId]);
 const touchUser = (userId) => run("UPDATE users SET last_seen_at = ? WHERE user_id = ?", [Date.now(), userId]);
@@ -460,6 +533,7 @@ async function adminDeleteUser(userId) {
   await writeBatch([
     ...owned.flatMap(deleteListStmts),
     q("DELETE FROM list_members WHERE user_id = ?", [userId]),
+    q("DELETE FROM user_tokens WHERE user_id = ?", [userId]),
     q("DELETE FROM users WHERE user_id = ?", [userId]),
   ]);
   return { user, deletedLists: affected, leftLists: memberOf };
@@ -487,8 +561,9 @@ async function purgeCompleted(olderThanMs) {
 
 /* Full JSON dump (includes token hashes so it can be restored; treat as sensitive). */
 async function exportAll() {
-  const [users, lists, members, items] = await readBatch([
+  const [users, tokens, lists, members, items] = await readBatch([
     "SELECT * FROM users",
+    "SELECT * FROM user_tokens",
     "SELECT * FROM lists",
     "SELECT * FROM list_members",
     "SELECT * FROM items",
@@ -496,9 +571,15 @@ async function exportAll() {
   const plain = (res) => res.rows.map((r) => Object.fromEntries(res.columns.map((c) => [c, r[c]])));
   return {
     format: "shopping-list-backup",
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
-    tables: { users: plain(users), lists: plain(lists), list_members: plain(members), items: plain(items) },
+    tables: {
+      users: plain(users),
+      user_tokens: plain(tokens),
+      lists: plain(lists),
+      list_members: plain(members),
+      items: plain(items),
+    },
   };
 }
 
@@ -516,7 +597,9 @@ module.exports = {
   createUser,
   findUserByToken,
   findUserById,
+  findUserByEmail,
   setVerifiedEmail,
+  mergeAccounts,
   renameUser,
   touchUser,
   getList,

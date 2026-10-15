@@ -112,8 +112,20 @@ input, textarea { font-family: inherit; color: inherit; }
 a { color: inherit; text-decoration: none; }
 .hidden { display: none !important; }
 
-/* ---------- The glass surface ---------- */
-.glass,
+/* ---------- The glass surface ----------
+ * Real frosting (backdrop-filter) is expensive: the browser re-blurs whatever is
+ * behind the element on every frame in which that backdrop changes — i.e. on every
+ * scroll frame. It is therefore reserved for the few fixed/sticky chrome surfaces
+ * marked .glass (headers, dock, input bars, banners). Everything that scrolls or
+ * repeats (rows, cards, chips, inputs) gets the same tint and border without a live
+ * blur; over the app's dark gradient it looks the same and scrolls at full frame rate.
+ */
+.glass {
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+}
 .card,
 .acc-card,
 .acc-row,
@@ -136,42 +148,50 @@ a { color: inherit; text-decoration: none; }
 .save-template-row input,
 .otp-input {
   background: var(--glass-bg);
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
   border: 1px solid var(--glass-border);
 }
 
-/* ---------- Background orbs ---------- */
+/* ---------- Background orbs ----------
+ * The orbs are radial gradients, already soft: no filter: blur() (a 70px blur on
+ * screen-sized layers was re-rasterized constantly). They only ever move by
+ * transform, on their own compositor layers, and stand still while the user is
+ * scrolling, while a sheet is open, and in the shopping view, so the frosted
+ * chrome above them doesn't have to be re-blurred on those frames.
+ */
 .bg-orbs {
   position: fixed;
   inset: 0;
   z-index: 0;
   overflow: hidden;
   pointer-events: none;
+  contain: strict;
   background: radial-gradient(120% 80% at 50% 0%, var(--bg) 0%, var(--bg-deep) 100%);
 }
 .orb {
   position: absolute;
   border-radius: 50%;
-  filter: blur(70px);
   will-change: transform;
+  backface-visibility: hidden;
 }
+html.is-scrolling .orb,
+body[data-tab="lists"] .orb,
+body:has(.modal-overlay:not(.hidden)) .orb { animation-play-state: paused; }
 .orb-green {
   width: 60vmax; height: 60vmax;
   top: -18vmax; right: -20vmax;
-  background: radial-gradient(circle, var(--orb-green), transparent 65%);
+  background: radial-gradient(circle, var(--orb-green), transparent 70%);
   animation: orbDriftA 28s ease-in-out infinite alternate;
 }
 .orb-purple {
   width: 70vmax; height: 70vmax;
   bottom: -28vmax; left: -26vmax;
-  background: radial-gradient(circle, var(--orb-purple), transparent 65%);
+  background: radial-gradient(circle, var(--orb-purple), transparent 70%);
   animation: orbDriftB 34s ease-in-out infinite alternate;
 }
 .orb-teal {
   width: 38vmax; height: 38vmax;
   top: 40%; left: 30%;
-  background: radial-gradient(circle, var(--orb-teal), transparent 65%);
+  background: radial-gradient(circle, var(--orb-teal), transparent 70%);
   animation: orbDriftC 40s ease-in-out infinite alternate;
 }
 @keyframes orbDriftA { to { transform: translate(-14vmax, 18vmax) scale(1.15); } }
@@ -185,11 +205,8 @@ a { color: inherit; text-decoration: none; }
   flex-direction: column;
   min-height: 0;
 }
-.tab-panel.view-enter { animation: viewIn 0.34s cubic-bezier(0.22, 1, 0.36, 1); }
-@keyframes viewIn {
-  from { opacity: 0; transform: translateX(var(--enter-x, 0)) scale(0.985); }
-  to { opacity: 1; transform: none; }
-}
+/* Tab entrances are a 140ms fade/slide run by switchTab() with the Web Animations API
+   (no forced reflow to restart a CSS animation, nothing left behind afterwards). */
 .tab-body { padding: 8px 16px 24px; }
 
 /* ---------- Header ---------- */
@@ -270,12 +287,15 @@ a { color: inherit; text-decoration: none; }
   position: absolute;
   top: 0;
   bottom: 0;
+  right: 0;
   width: 35%;
   background: var(--accent);
   box-shadow: 0 0 8px var(--accent);
   animation: syncSlide 1.3s ease-in-out infinite;
+  will-change: transform;
 }
-@keyframes syncSlide { from { right: -35%; } to { right: 100%; } }
+/* transform, not `right`: animating an offset re-runs layout on every frame. */
+@keyframes syncSlide { from { transform: translateX(100%); } to { transform: translateX(-286%); } }
 
 /* ---------- Search & filters ---------- */
 .search-row { padding: 6px 12px; display: flex; gap: 8px; align-items: stretch; }
@@ -719,13 +739,18 @@ a { color: inherit; text-decoration: none; }
   top: 6px;
   bottom: 6px;
   width: calc((100% - 12px) / 3);
-  inset-inline-start: calc(6px + var(--i) * (100% - 12px) / 3);
+  inset-inline-start: 6px;
+  /* Slides by its own width per tab: a compositor-only transform, not a layout animation.
+     RTL: the first tab is on the right, so later tabs are to the left (negative X). */
+  transform: translateX(calc(var(--i) * -100%));
   border-radius: 18px;
   background: var(--accent-soft);
   border: 1px solid rgba(0, 230, 118, 0.35);
   box-shadow: 0 0 18px rgba(0, 230, 118, 0.25);
-  transition: inset-inline-start 0.38s cubic-bezier(0.34, 1.4, 0.64, 1);
+  transition: transform 0.26s cubic-bezier(0.34, 1.3, 0.64, 1);
+  will-change: transform;
 }
+[dir="ltr"] .nav-indicator { transform: translateX(calc(var(--i) * 100%)); }
 .nav-btn {
   position: relative;
   z-index: 1;
@@ -818,10 +843,9 @@ body[data-tab="ai"] .toast-stack { bottom: calc(var(--nav-h) + 128px); } /* clea
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  background: rgba(2, 6, 23, 0.55);
-  -webkit-backdrop-filter: blur(4px);
-  backdrop-filter: blur(4px);
-  animation: fadeIn 0.18s ease;
+  /* Dim only: a full-screen blur under the (already frosted) sheet doubled the blur work on every frame of the slide-up. */
+  background: rgba(2, 6, 23, 0.6);
+  animation: fadeIn 0.16s ease;
 }
 .modal-overlay.centered { align-items: center; }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
@@ -1245,8 +1269,6 @@ label.row, .row-btn { cursor: pointer; }
   background:
     linear-gradient(140deg, rgba(124, 58, 237, 0.35), rgba(0, 230, 118, 0.16) 70%),
     var(--glass-bg);
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
   border: 1px solid rgba(0, 230, 118, 0.35);
   box-shadow: 0 0 34px rgba(124, 58, 237, 0.3), 0 0 24px rgba(0, 230, 118, 0.15);
   isolation: isolate;
@@ -1258,7 +1280,9 @@ label.row, .row-btn { cursor: pointer; }
   z-index: -1;
   background: conic-gradient(from 0deg, transparent 0 70%, rgba(0, 230, 118, 0.35) 80%, transparent 90%);
   animation: premiumSpin 7s linear infinite;
+  will-change: transform; /* rotate on the compositor, never repaint */
 }
+html.is-scrolling .premium-card::before { animation-play-state: paused; }
 @keyframes premiumSpin { to { transform: rotate(360deg); } }
 .premium-badge {
   display: inline-block;
@@ -1549,7 +1573,8 @@ label.row, .row-btn { cursor: pointer; }
 /* ---------- Accessibility & performance ---------- */
 @media (prefers-reduced-motion: reduce) {
   .orb, .premium-card::before, .btn-premium, .ai-empty-icon { animation: none; }
-  .tab-panel.view-enter, .modal-sheet, .toast { animation-duration: 0.01s; }
+  .modal-sheet, .toast { animation-duration: 0.01s; }
+  .nav-indicator { transition: none; }
   .ai-dots .dot { animation: none; opacity: 0.8; }
 }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
@@ -1576,15 +1601,11 @@ label.row, .row-btn { cursor: pointer; }
   color: #1a1300;
   background: linear-gradient(120deg, #ffd54f, #ffe082 35%, var(--accent) 100%);
   border-color: rgba(255, 213, 79, 0.7);
-  box-shadow: 0 0 14px rgba(255, 213, 79, 0.55), 0 0 22px rgba(0, 230, 118, 0.3);
-  animation: ownerGlow 2.8s ease-in-out infinite alternate;
-}
-@keyframes ownerGlow {
-  to { box-shadow: 0 0 20px rgba(255, 213, 79, 0.75), 0 0 30px rgba(0, 230, 118, 0.45); }
+  /* Static glow: an infinitely animated box-shadow repaints the badge every frame. */
+  box-shadow: 0 0 16px rgba(255, 213, 79, 0.62), 0 0 26px rgba(0, 230, 118, 0.36);
 }
 .profile-label-row { display: flex; align-items: center; gap: 8px; }
 .owner-tools { border-color: rgba(255, 213, 79, 0.4); box-shadow: var(--shadow), 0 0 22px rgba(255, 213, 79, 0.15); }
-@media (prefers-reduced-motion: reduce) { .role-badge.owner { animation: none; } }
 
 /* ---------- Touch: no double-tap zoom delay, comfortable hit areas ---------- */
 button, a, label.row, input, .item-main { touch-action: manipulation; }
@@ -1789,3 +1810,73 @@ body[data-tab="lists"] .item-row { scroll-margin-bottom: calc(140px + var(--safe
   .home-header { padding-top: calc(10px + var(--safe-top)); }
   .progress-ring { width: 56px; height: 56px; }
 }
+
+/* ======================================================================
+ * Rendering performance
+ * ====================================================================== */
+/*
+ * Each row is an independent box: a change inside one row never re-lays-out the
+ * list, and rows scrolled far off screen are skipped entirely by the renderer
+ * (content-visibility). `auto 66px` lets the browser remember each row's real size.
+ */
+.item-row {
+  contain: layout style paint;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 66px;
+}
+/* A compositor layer only while a row is being dragged, not for every row all the time. */
+.item-row.swiping .item-content { will-change: transform; }
+.aisle-header, .checked-header { contain: layout style; }
+
+/* ======================================================================
+ * Native app feel
+ * ====================================================================== */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  /* No rubber-band bounce, no pull-to-refresh, no edge glow on the page itself. */
+  overscroll-behavior: none;
+}
+html, body { overscroll-behavior: none; }
+body {
+  /* UI text isn't selectable and long-press shows no callout, like a native app… */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+/* …except where people type or legitimately copy text. */
+input, textarea, select, [contenteditable="true"],
+.ai-bubble, .ai-item-name, .ai-item-qty, .ai-error-detail, .pair-code, .acc-id, .selectable {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+img, svg { -webkit-user-drag: none; user-drag: none; }
+/* Inner scrollers keep their scroll to themselves (no chaining into the page behind a sheet). */
+.modal-body, #aiMessages, .filter-row, .quick-strip, .chef-prompts { overscroll-behavior: contain; }
+
+/*
+ * Touch ripple (added by app.js on pointerdown, so it shows the instant the finger
+ * lands — :active alone waits for the browser to rule out a scroll). Zero-specificity
+ * :where() so a component's own position/overflow always wins over these defaults.
+ */
+:where(.btn, .small-btn, .row-btn, .nav-btn, .icon-btn, .acc-row, .chip, .quick-chip, .suggestion-chip,
+       .cat-option, .shortcut, .share-opt, .add-btn, .checked-toggle, .list-switcher,
+       .confirm-cancel, .confirm-ok, .update-now-btn, .field-btn, .send-btn) {
+  position: relative;
+  overflow: hidden;
+}
+.ripple {
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+  background: currentColor;
+  opacity: 0.2;
+  transform: scale(0);
+  animation: ripple 0.45s cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+}
+@keyframes ripple { to { transform: scale(1); opacity: 0; } }
+/* Rows give feedback by tint instead (a ripple would clip the check circle's large touch area). */
+.item-main:active { opacity: 0.75; }
+.item-row.long-pressed .item-content { background: var(--glass-hover); }
+@media (prefers-reduced-motion: reduce) { .ripple { display: none; } }

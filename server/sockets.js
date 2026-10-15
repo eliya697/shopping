@@ -14,6 +14,11 @@ const LIMITS = { text: 80, quantity: 30, notes: 200, listName: 40, username: 30 
 const JOIN_FAILS_MAX = 10;
 const JOIN_FAILS_WINDOW_MS = 10 * 60 * 1000;
 const joinFails = new Map();
+// Without this the map would keep one entry per user who ever mistyped a code.
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, r] of joinFails) if (now - r.since >= JOIN_FAILS_WINDOW_MS) joinFails.delete(userId);
+}, JOIN_FAILS_WINDOW_MS).unref();
 
 const listRoom = (listId) => `list:${listId}`;
 const userRoom = (userId) => `user:${userId}`;
@@ -376,6 +381,22 @@ module.exports = function attachSockets(io) {
       }
       // On reconnect their token is rejected with INVALID_TOKEN and the app signs out cleanly.
       io.in(userRoom(user.userId)).disconnectSockets(true);
+    },
+
+    /*
+     * Account `from` was merged into `into` (owner recovery). `from`'s devices are
+     * dropped and reconnect with the same token, which now signs them in as `into`;
+     * everyone sharing an affected list sees the new owner/member names.
+     */
+    async accountMerged({ from, into, touchedLists }) {
+      io.in(userRoom(from.userId)).disconnectSockets(true);
+      const others = new Set([into.userId]);
+      for (const listId of touchedLists) {
+        await pushMembers(listId);
+        const list = await store.getList(listId);
+        if (list) list.members.forEach((m) => others.add(m.userId));
+      }
+      await pushLists(...others);
     },
 
     /* Checked items were purged by the cleanup job. */

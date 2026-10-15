@@ -208,6 +208,23 @@
     return wrap;
   }
 
+  /*
+   * A settled message's DOM is built once and reused by every later render (another
+   * question, switching back to this tab…): rebuilding it each time re-created every
+   * recipe card and re-decoded attached photos. Rebuilt only when something it shows
+   * changed; the message being streamed is always fresh.
+   */
+  const nodeCache = new WeakMap(); // message -> { key, node }
+  function messageNode(m, i) {
+    const last = i === messages.length - 1;
+    const key = [(m.text || "").length, m.partial ? 1 : 0, m.error && m.retry && last ? 1 : 0].join("|");
+    const hit = nodeCache.get(m);
+    if (hit && hit.key === key && !m.streaming) return hit.node;
+    const node = renderMessage(m, i);
+    if (!m.streaming) nodeCache.set(m, { key, node });
+    return node;
+  }
+
   /* Fresh chat: a greeting; the suggestion chips sit in the input dock. */
   function renderEmpty() {
     const wrap = make("div", "ai-empty");
@@ -227,9 +244,9 @@
     $.newChat.disabled = !messages.length && !busy;
     if (!signedIn) return;
 
-    $.messages.innerHTML = "";
-    if (!messages.length && !busy) $.messages.appendChild(renderEmpty());
-    messages.forEach((m, i) => $.messages.appendChild(renderMessage(m, i)));
+    const nodes = [];
+    if (!messages.length && !busy) nodes.push(renderEmpty());
+    messages.forEach((m, i) => nodes.push(messageNode(m, i)));
     const writing = messages.length && messages[messages.length - 1].streaming;
     if (busy && !writing) {
       // Loading bubble: shown from the moment a question is sent until the answer is rendered.
@@ -243,12 +260,13 @@
       bubble.appendChild(dots);
       bubble.appendChild(make("span", "ai-typing-text", statusText));
       typing.appendChild(bubble);
-      $.messages.appendChild(typing);
+      nodes.push(typing);
     }
     // Invisible room under the last message, so it always scrolls fully clear of the input bar.
     const spacer = make("div", "scroll-spacer");
     spacer.setAttribute("aria-hidden", "true");
-    $.messages.appendChild(spacer);
+    nodes.push(spacer);
+    $.messages.replaceChildren(...nodes);
 
     $.send.disabled = busy || sendLocked();
     refreshAddButtons();
@@ -361,6 +379,9 @@
         }
       }
     } catch (e) {
+      // Close the response stream: otherwise the connection (and the server's Gemini
+      // call behind it) keeps running after we've given up, e.g. on a server error event.
+      reader.cancel().catch(() => {});
       if (e && e.code) throw e;
       throw { code: controller.signal.aborted ? "timeout" : "interrupted" };
     } finally {

@@ -3,8 +3,8 @@
  *
  * Reads are synchronous: at startup every record is loaded into memory once
  * (LocalDB.ready), so rendering never waits on storage. Writes update memory
- * immediately and reach IndexedDB in one batched transaction a frame later, so a
- * tap never blocks on JSON.stringify + localStorage the way it used to.
+ * immediately and reach IndexedDB in one batched transaction at the next idle
+ * moment, so neither a tap nor a scroll ever waits on storage.
  *
  * Small preferences (theme, view mode…) stay in localStorage: they're read before
  * first paint by the inline script in index.html, and by admin.html.
@@ -18,8 +18,12 @@
   const DB_NAME = "shopping-list";
   const DB_VERSION = 1;
   const STORE = "kv";
-  const OPEN_TIMEOUT_MS = 1500;
-  const MAX_WRITE_DELAY_MS = 120;
+  // A broken IndexedDB (old Safari private mode) hangs forever; a merely slow one (cold
+  // start on a busy low-end phone) can take a few seconds. Falling back costs this
+  // run its device data, so only give up on the first kind.
+  const OPEN_TIMEOUT_MS = 6000;
+  // Writes wait for an idle moment (never mid-scroll or mid-animation), at most this long.
+  const MAX_WRITE_DELAY_MS = 500;
   // localStorage keys that move into IndexedDB (exact keys, or prefixes ending in ".").
   const MIGRATE = ["shoppingList.items.v1", "shoppingList.pending.v1", "shoppingList.listCache.v1."];
 
@@ -43,7 +47,11 @@
   function openDB() {
     return new Promise((resolve, reject) => {
       if (!global.indexedDB) return reject(new Error("no indexedDB"));
-      const timer = setTimeout(() => reject(new Error("indexedDB open timed out")), OPEN_TIMEOUT_MS);
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        reject(new Error("indexedDB open timed out"));
+      }, OPEN_TIMEOUT_MS);
       let req;
       try {
         req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -57,6 +65,8 @@
       req.onsuccess = () => {
         clearTimeout(timer);
         const conn = req.result;
+        // We already fell back to localStorage: don't leak a connection nobody uses.
+        if (timedOut) return conn.close();
         // Another tab is upgrading the schema: let it, we'll reopen on next load.
         conn.onversionchange = () => conn.close();
         resolve(conn);
@@ -82,7 +92,13 @@
     });
   }
 
-  /* First run on IndexedDB: copy the old localStorage data over, then drop it there. */
+  /*
+   * Move localStorage copies of these keys into IndexedDB, then drop them there.
+   * They exist in two cases: the very first run on IndexedDB (old app versions), and
+   * after a run that had to fall back to localStorage. In the second case they are
+   * NEWER than what IndexedDB holds (that run's edits and outbox), so they always win;
+   * keeping the older IndexedDB copy and deleting these used to lose that run's data.
+   */
   function migrateFromLocalStorage() {
     let keys = [];
     try {
@@ -90,9 +106,8 @@
     } catch (e) {
       return Promise.resolve();
     }
-    const fresh = keys.filter((k) => !memory.has(k));
-    if (!fresh.length) return Promise.resolve();
-    fresh.forEach((k) => {
+    if (!keys.length) return Promise.resolve();
+    keys.forEach((k) => {
       const value = lsGet(k);
       if (value !== undefined) {
         memory.set(k, value);
@@ -154,11 +169,15 @@
     });
   }
 
+  /*
+   * IndexedDB's put() structured-clones the value on the main thread, which for a big
+   * list cache is real work. Do it when the browser is idle (not during a scroll fling
+   * or an animation frame), bounded by MAX_WRITE_DELAY_MS. Going to the background
+   * flushes immediately (see flushNow), so the delay never risks losing a change.
+   */
   function scheduleFlush() {
     if (flushScheduled) return;
     flushScheduled = true;
-    // After the frame that shows the change, so the write never delays the paint.
-    // Frames can be paused (pane hidden, screen turning off), so a timer bounds the wait.
     let done = false;
     const run = () => {
       if (done) return;
@@ -166,8 +185,12 @@
       flushScheduled = false;
       writeDirty();
     };
-    if (global.requestAnimationFrame && document.visibilityState === "visible") requestAnimationFrame(() => setTimeout(run, 0));
-    setTimeout(run, MAX_WRITE_DELAY_MS);
+    if (global.requestIdleCallback) {
+      global.requestIdleCallback(run, { timeout: MAX_WRITE_DELAY_MS });
+    } else if (global.requestAnimationFrame && document.visibilityState === "visible") {
+      requestAnimationFrame(() => setTimeout(run, 0)); // after the frame that shows the change
+    }
+    setTimeout(run, MAX_WRITE_DELAY_MS + 50); // frames/idle can be paused (hidden pane, screen off)
   }
 
   const ready = (async () => {

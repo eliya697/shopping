@@ -79,6 +79,9 @@
   td.num { font-variant-numeric: tabular-nums; }
   .chips { display: flex; flex-wrap: wrap; gap: 4px; }
   .chip { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 0 6px; cursor: copy; }
+  td.actions { white-space: nowrap; }
+  td.actions > * + * { margin-inline-start: 6px; }
+  .chip.owner-chip { cursor: default; font-weight: 700; }
   .id { cursor: copy; }
   .empty { text-align: center; padding: 24px; color: var(--text-dim); }
   .tools { display: flex; flex-wrap: wrap; gap: 10px; }

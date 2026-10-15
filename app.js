@@ -299,6 +299,48 @@
   $.confirmCancelBtn.addEventListener("click", hideConfirm);
   $.confirmOverlay.addEventListener("click", (e) => { if (e.target === $.confirmOverlay) hideConfirm(); });
 
+  /* ---------- Native feel: touch ripple, no browser context menu, scroll state ---------- */
+  const RIPPLE_HOSTS = [
+    ".btn", ".small-btn", ".row-btn", ".nav-btn", ".icon-btn", ".acc-row", ".chip", ".quick-chip",
+    ".suggestion-chip", ".cat-option", ".shortcut", ".share-opt", ".add-btn", ".checked-toggle",
+    ".list-switcher", ".confirm-cancel", ".confirm-ok", ".update-now-btn", ".field-btn", ".send-btn",
+  ].join(", ");
+
+  // Shown the moment the finger lands (pointerdown), unlike :active, which the browser
+  // holds back until it knows the touch isn't a scroll. One layout read per tap.
+  document.addEventListener("pointerdown", (e) => {
+    if (reduceMotion || (e.pointerType === "mouse" && e.button !== 0)) return;
+    const host = e.target.closest(RIPPLE_HOSTS);
+    if (!host || host.disabled) return;
+    const r = host.getBoundingClientRect();
+    const size = Math.max(r.width, r.height) * 2;
+    const dot = document.createElement("span");
+    dot.className = "ripple";
+    dot.setAttribute("aria-hidden", "true");
+    dot.style.cssText = `width:${size}px;height:${size}px;left:${e.clientX - r.left - size / 2}px;top:${e.clientY - r.top - size / 2}px`;
+    host.appendChild(dot);
+    setTimeout(() => dot.remove(), 500);
+  }, { passive: true });
+
+  // Long-press opens our own UI (e.g. the item editor), never the browser's link/image menu.
+  document.addEventListener("contextmenu", (e) => {
+    if (e.target.closest("input, textarea, [contenteditable='true'], .ai-bubble, .selectable, .pair-code, .acc-id")) return;
+    e.preventDefault();
+  });
+
+  // html.is-scrolling while any scroller moves: CSS pauses decorative animations then, so
+  // the frosted chrome doesn't have to be re-blurred on top of a moving background.
+  // Capture catches inner scrollers too (scroll doesn't bubble); passive never delays the scroll.
+  let scrollIdleTimer = 0;
+  document.addEventListener("scroll", () => {
+    if (!scrollIdleTimer) document.documentElement.classList.add("is-scrolling");
+    clearTimeout(scrollIdleTimer);
+    scrollIdleTimer = setTimeout(() => {
+      scrollIdleTimer = 0;
+      document.documentElement.classList.remove("is-scrolling");
+    }, 180);
+  }, { passive: true, capture: true });
+
   /* ---------- Theme (dark by default; light is opt-in from the Profile tab) ---------- */
   const THEME_BAR_COLOR = { dark: "#0f172a", light: "#eef2f9" };
 
@@ -624,14 +666,38 @@
     return nodes;
   }
 
-  function render() {
-    renderFilterRow();
+  /*
+   * Socket events can arrive in bursts (a partner pastes 20 items, a template load,
+   * a reconnect replay). They go through scheduleRender(): any number of them in one
+   * frame cost one render. Local taps still call render() directly, for 0ms feedback.
+   */
+  let renderQueued = false;
+  function scheduleRender() {
+    if (renderQueued) return;
+    renderQueued = true;
+    const run = () => {
+      if (!renderQueued) return;
+      renderQueued = false;
+      render();
+    };
+    requestAnimationFrame(run);
+    // Frames can be throttled or paused (split screen, covered WebView, hidden tab):
+    // never leave the screen stale for longer than this.
+    setTimeout(run, 100);
+  }
 
+  function render() {
     const totalCount = items.length;
     const remaining = items.filter((i) => !i.bought).length;
     $.subtitle.textContent = totalCount === 0 ? "הרשימה ריקה" : `${remaining} מתוך ${totalCount} נותרו`;
     $.shopProgress.style.transform = `scaleX(${totalCount ? (totalCount - remaining) / totalCount : 0})`;
     if (activeTab === "home") renderHome();
+    if (activeTab === "ai") AIChat.refreshAddButtons();
+    if (isOpen($.quickOverlay)) renderQuickList();
+
+    // The shopping list's DOM is only reconciled while it's on screen; switchTab("lists") renders it.
+    if (activeTab !== "lists") return;
+    renderFilterRow();
 
     const visible = getVisibleItems();
     const desired = layoutNodes(visible);
@@ -639,12 +705,14 @@
     // Drop rows/headers that are no longer shown; animate only real deletions.
     const keep = new Set(desired);
     const existingIds = new Set(items.map((i) => i.id));
+    const retiring = [];
     rowRefs.forEach((ref, id) => {
       if (keep.has(ref.row)) return;
       rowRefs.delete(id);
       if (existingIds.has(id)) ref.row.remove();
-      else retireRow(ref.row);
+      else retiring.push(ref.row);
     });
+    retireRows(retiring);
     headerEls.forEach((h, key) => {
       if (!keep.has(h)) {
         h.remove();
@@ -657,19 +725,19 @@
     // Put nodes in order, moving only the ones that are out of place.
     let cursor = $.listContainer.firstChild;
     desired.forEach((node) => {
-      while (cursor && cursor.classList.contains("removing")) cursor = cursor.nextSibling;
+      while (cursor && cursor.classList.contains("retiring")) cursor = cursor.nextSibling;
       if (cursor === node) cursor = node.nextSibling;
       else $.listContainer.insertBefore(node, cursor);
     });
 
-    flashIds.forEach((id) => {
-      const ref = rowRefs.get(id);
-      if (!ref) return;
-      ref.content.classList.remove("pulse-remote");
-      void ref.content.offsetWidth;
-      ref.content.classList.add("pulse-remote");
-    });
-    flashIds.clear();
+    // Restart the highlight on remotely added rows: one reflow for all of them, not one each.
+    if (flashIds.size) {
+      const flashing = [...flashIds].map((id) => rowRefs.get(id)).filter(Boolean);
+      flashing.forEach((ref) => ref.content.classList.remove("pulse-remote"));
+      if (flashing.length) void flashing[0].content.offsetWidth;
+      flashing.forEach((ref) => ref.content.classList.add("pulse-remote"));
+      flashIds.clear();
+    }
 
     const isEmpty = visible.length === 0;
     $.emptyState.classList.toggle("hidden", !isEmpty);
@@ -681,17 +749,35 @@
         : "נסו לשנות את החיפוש או הסינון";
     }
 
-    if (isOpen($.quickOverlay)) renderQuickList();
     if (document.activeElement === $.newItemInput) renderQuickStrip();
-    if (activeTab === "ai") AIChat.refreshAddButtons();
   }
 
-  function retireRow(row) {
-    row.style.maxHeight = row.offsetHeight + "px";
-    void row.offsetHeight; // commit the start height so the collapse animates
-    row.classList.add("removing");
-    row.style.maxHeight = "0px";
-    setTimeout(() => row.remove(), 260);
+  /*
+   * Collapse deleted rows. All heights are read in one go (a single layout) before
+   * any style is written, instead of read/write/read/write per row, which forced a
+   * synchronous layout for every row when clearing a long "checked" section.
+   * Bulk removals skip the animation entirely.
+   */
+  const RETIRE_ANIMATE_MAX = 8;
+  function retireRows(rows) {
+    if (!rows.length) return;
+    if (rows.length > RETIRE_ANIMATE_MAX || reduceMotion) {
+      rows.forEach((row) => row.remove());
+      return;
+    }
+    const heights = rows.map((row) => row.offsetHeight);
+    rows.forEach((row, i) => {
+      row.classList.add("retiring"); // render()'s ordering loop skips these
+      row.style.maxHeight = heights[i] + "px";
+    });
+    // Two frames: the start height must be painted once before it can transition to 0.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      rows.forEach((row) => {
+        row.classList.add("removing");
+        row.style.maxHeight = "0px";
+      });
+    }));
+    setTimeout(() => rows.forEach((row) => row.remove()), 320);
   }
 
   function memberName(userId) {
@@ -795,46 +881,97 @@
     return { row, content, circle, emojiEl, emojiKey: null, nameEl, qtyEl, metaEl, metaText, noteEl };
   }
 
-  /* ---------- Swipe to delete ---------- */
-  function attachSwipeToDelete(content, id) {
-    let startX = 0;
-    let currentX = 0;
-    let dragging = false;
-    let swipedAt = 0;
-    const threshold = 70;
+  /* ---------- Row gestures: swipe left to delete, long-press to edit ----------
+   * - Nothing happens until the finger moves past a small slop; then the gesture is
+   *   locked: horizontal-and-leftward is a swipe, anything else belongs to the page
+   *   scroll (and the browser takes it over with pointercancel, thanks to
+   *   touch-action: pan-y). Vertical scrolling never touches the row's styles.
+   * - During a swipe the row follows the finger via one transform write per frame,
+   *   with pointer capture so a fast flick that leaves the row isn't dropped.
+   * - Holding still on a row opens its editor, like long-pressing in a native list.
+   * All listeners are passive: none of them ever blocks scrolling.
+   */
+  const SWIPE_SLOP = 8;
+  const SWIPE_DELETE_PX = 70;
+  const LONG_PRESS_MS = 480;
 
-    function onDown(e) {
-      dragging = true;
+  function attachSwipeToDelete(content, id) {
+    let pointerId = null;
+    let startX = 0;
+    let startY = 0;
+    let dx = 0;
+    let mode = null; // null (undecided) | "swipe" | "scroll"
+    let frame = 0;
+    let pressTimer = 0;
+    let swipedAt = 0;
+    const row = () => content.parentElement;
+    const paint = () => {
+      frame = 0;
+      content.style.transform = `translateX(${dx}px)`;
+    };
+
+    content.addEventListener("pointerdown", (e) => {
+      if (pointerId !== null || (e.pointerType === "mouse" && e.button !== 0)) return;
+      pointerId = e.pointerId;
       startX = e.clientX;
-      currentX = 0;
-      content.style.transition = "none";
-    }
-    function onMove(e) {
-      if (!dragging) return;
-      currentX = e.clientX - startX;
-      if (currentX > 0) currentX = 0; // only allow leftward drag
-      content.style.transform = `translateX(${currentX}px)`;
-      content.parentElement.classList.toggle("swiping", currentX < -4);
-    }
-    function onUp() {
-      if (!dragging) return;
-      dragging = false;
-      setTimeout(() => content.parentElement && content.parentElement.classList.remove("swiping"), 180);
+      startY = e.clientY;
+      dx = 0;
+      mode = null;
+      if (e.target.closest(".check-circle")) return; // the V is a tap target only
+      pressTimer = setTimeout(() => {
+        if (mode !== null || pointerId === null) return;
+        swipedAt = Date.now(); // swallow the click that follows the long press
+        haptic([12]);
+        const r = row();
+        if (r) {
+          r.classList.add("long-pressed");
+          setTimeout(() => r.classList.remove("long-pressed"), 250);
+        }
+        openItemEditor(id);
+      }, LONG_PRESS_MS);
+    }, { passive: true });
+
+    content.addEventListener("pointermove", (e) => {
+      if (e.pointerId !== pointerId) return;
+      const mx = e.clientX - startX;
+      const my = e.clientY - startY;
+      if (mode === null) {
+        if (Math.abs(mx) < SWIPE_SLOP && Math.abs(my) < SWIPE_SLOP) return;
+        clearTimeout(pressTimer);
+        mode = Math.abs(mx) > Math.abs(my) && mx < 0 ? "swipe" : "scroll";
+        if (mode !== "swipe") return;
+        try { content.setPointerCapture(pointerId); } catch (err) {}
+        content.style.transition = "none";
+        row().classList.add("swiping");
+      }
+      if (mode !== "swipe") return;
+      dx = Math.min(0, mx); // only leftward
+      if (!frame) frame = requestAnimationFrame(paint);
+    }, { passive: true });
+
+    const end = (e) => {
+      if (e.pointerId !== pointerId) return;
+      clearTimeout(pressTimer);
+      const wasSwipe = mode === "swipe";
+      pointerId = null;
+      mode = null;
+      if (!wasSwipe) return;
+      cancelAnimationFrame(frame);
+      frame = 0;
+      swipedAt = Date.now(); // a drag, not a tap: don't open the editor
       content.style.transition = "transform 0.18s ease";
-      if (Math.abs(currentX) > 6) swipedAt = Date.now(); // a drag, not a tap
-      if (Math.abs(currentX) > threshold) {
+      if (dx < -SWIPE_DELETE_PX) {
+        content.style.transform = `translateX(${dx}px)`;
         deleteItem(id);
       } else {
         content.style.transform = "translateX(0)";
       }
-      currentX = 0;
-    }
-
-    content.addEventListener("pointerdown", onDown);
-    content.addEventListener("pointermove", onMove);
-    content.addEventListener("pointerup", onUp);
-    content.addEventListener("pointercancel", onUp);
-    content.addEventListener("pointerleave", () => { if (dragging) onUp(); });
+      const r = row();
+      setTimeout(() => r && r.classList.remove("swiping"), 180);
+      dx = 0;
+    };
+    content.addEventListener("pointerup", end, { passive: true });
+    content.addEventListener("pointercancel", end, { passive: true });
     return { justSwiped: () => Date.now() - swipedAt < 400 };
   }
 
@@ -1537,9 +1674,17 @@
   const ROLE_LABEL = { owner: "👑 בעלים", user: "חבר" };
   const isOwnerAccount = () => !!(account && account.isAdmin && account.role === "owner");
 
-  /* Merge a user object from the server (register, pairing, socket session, rename). */
+  /*
+   * Merge a user object from the server (register, pairing, socket session, rename).
+   * The id can change: after owner recovery the server folds this device's account
+   * into the original one, and the same token then signs in as that account.
+   */
   function applyUser(user) {
     if (!account || !user) return;
+    if (user.userId && user.userId !== account.userId) {
+      console.info("[account] this device now signs in as", user.userId);
+      account.userId = user.userId;
+    }
     account.username = user.username || account.username;
     if (user.role) {
       account.role = user.role === "owner" ? "owner" : "user";
@@ -1606,7 +1751,16 @@
       saveAdminSession(res.body.session);
       $.ownerKeyInput.value = "";
       closeSheet($.ownerOverlay);
-      toast({ text: "החשבון חובר כחשבון הבעלים", icon: "👑", ms: 3500 });
+      if (res.body.recovered) {
+        // This device was on a fresh account; the server folded it into the original
+        // owner account. Show its lists now (the socket reconnects as that account).
+        applyLists(res.body.lists);
+        renderProfile();
+        toast({ text: "חשבון הבעלים המקורי שוחזר — הרשימות והבעלות עליהן חזרו", icon: "👑", ms: 5000 });
+      } else {
+        toast({ text: "החשבון חובר כחשבון הבעלים", icon: "👑", ms: 3500 });
+      }
+      requestPersistentStorage();
     } catch (e) {
       setOwnerStatus("השרת לא הגיב. נסו שוב בעוד רגע.", true);
     } finally {
@@ -1724,15 +1878,11 @@
     if (activeTab === "lists" && document.activeElement === $.newItemInput) $.newItemInput.blur();
     activeTab = tab;
     document.body.dataset.tab = tab;
+    let shown = null;
     tabPanels.forEach((panel) => {
       const on = panel.dataset.tab === tab;
       panel.classList.toggle("hidden", !on);
-      panel.classList.remove("view-enter");
-      if (on) {
-        panel.style.setProperty("--enter-x", forward ? "-28px" : "28px");
-        void panel.offsetWidth; // restart the animation
-        panel.classList.add("view-enter");
-      }
+      if (on) shown = panel;
     });
     navButtons.forEach((b) => {
       const on = b.dataset.tab === tab;
@@ -1741,13 +1891,24 @@
       else b.removeAttribute("aria-current");
     });
     if (dockOrder.includes(tab)) navIndicator.style.setProperty("--i", dockOrder.indexOf(tab));
-    haptic([8]);
     window.scrollTo(0, 0);
-    writeJSON(STORAGE_KEYS.lastView, { view: tab, at: Date.now() });
+
+    // Fill the new view before its first frame, so the entrance never waits on rendering.
     if (tab === "home") renderHome();
     if (tab === "lists") render();
     if (tab === "ai") AIChat.onShow();
     if (tab === "profile") renderProfile();
+
+    // A short, compositor-only entrance (opacity + transform). Web Animations: no forced
+    // reflow to restart a CSS animation, and nothing is left on the element afterwards.
+    if (shown && shown.animate && !reduceMotion) {
+      shown.animate(
+        [{ opacity: 0, transform: `translateX(${forward ? -12 : 12}px)` }, { opacity: 1, transform: "none" }],
+        { duration: 140, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }
+      );
+    }
+    haptic([8]);
+    writeJSON(STORAGE_KEYS.lastView, { view: tab, at: Date.now() });
   }
   navButtons.forEach((b) => b.addEventListener("click", () => {
     // The dock is hidden in the shopping view, but keep its history entry consistent anyway.
@@ -2279,12 +2440,12 @@
     pendingCount = client.pendingCount;
     let wakeToastShown = false;
 
-    // Socket events about the active list: apply, persist, render.
+    // Socket events about the active list: apply and persist now, render once per frame.
     const forActive = (fn) => (data) => {
       if (!data || data.listId !== activeListId) return;
       fn(data);
       saveItems();
-      render();
+      scheduleRender();
     };
 
     client.on("status", (status) => {
@@ -2547,6 +2708,7 @@
     });
     sync.start();
     writeJSON(STORAGE_KEYS.welcomeSeen, true);
+    requestPersistentStorage();
     render();
     renderAccountUI();
     return user;
@@ -2610,6 +2772,7 @@
 
       sync = startSync();
       sync.start();
+      requestPersistentStorage();
 
       $.linkCodeInput.value = "";
       closeWelcome();
@@ -2975,7 +3138,10 @@
 
     // The Android app ships its files inside the APK; updates come from the store, not a service worker.
     if (window.PWAUpdate && !Native.isApp) window.PWAUpdate.register("sw.js");
-    requestPersistentStorage();
+    if (account) {
+      requestPersistentStorage();
+      maybeHintIosHomeScreen();
+    }
   }
 
   window.addEventListener("pwa:offline-ready", () => {
@@ -2983,13 +3149,36 @@
   });
 
   /*
-   * Ask the browser not to evict the offline copy under storage pressure. Only for the
-   * installed PWA: Chrome grants it silently there, and other browsers might prompt.
+   * The account exists only in this device's storage (there are no passwords), so the
+   * browser evicting it is how people "get logged out" and end up on a new account.
+   * Ask for persistent storage: Chromium decides silently (no prompt), so ask there
+   * even in a normal tab; Firefox would show a prompt, so only in the installed app.
    */
+  const isStandalone = () => !!(window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || navigator.standalone === true;
   function requestPersistentStorage() {
-    const standalone = window.matchMedia && window.matchMedia("(display-mode: standalone)").matches;
-    if (!standalone || Native.isApp || !navigator.storage || !navigator.storage.persist) return;
+    if (Native.isApp || !navigator.storage || !navigator.storage.persist) return;
+    if (/Firefox\//.test(navigator.userAgent) && !isStandalone()) return;
     navigator.storage.persisted().then((yes) => yes || navigator.storage.persist()).catch(() => {});
+  }
+
+  /*
+   * iPhone/iPad Safari erases a website's storage after 7 days without a visit, which
+   * signs the account out for good. Added to the home screen it's exempt: say so, once
+   * every two weeks, to signed-in users still using it as a website.
+   */
+  const IOS_HINT_KEY = "shoppingList.iosHomeHint.v1";
+  function maybeHintIosHomeScreen() {
+    const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    if (!ios || !account || Native.isApp || isStandalone()) return;
+    const last = readJSON(IOS_HINT_KEY, 0);
+    if (Date.now() - last < 14 * 24 * 60 * 60 * 1000) return;
+    writeJSON(IOS_HINT_KEY, Date.now());
+    setTimeout(() => toast({
+      key: "ios-hint",
+      icon: "📲",
+      ms: 12000,
+      text: "ב-Safari החשבון נמחק אחרי שבוע בלי כניסה. כדי לשמור אותו: שיתוף ← ״הוספה למסך הבית״.",
+    }), 4000);
   }
 
   LocalDB.ready.then(boot, boot);

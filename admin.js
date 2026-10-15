@@ -253,13 +253,43 @@
       const chips = el("div", { className: "chips" });
       u.listIds.forEach((id) => chips.append(el("span", { className: "chip mono", title: id, onclick: () => copy(id) }, shortId(id))));
       const del = el("button", { className: "danger small", onclick: () => deleteUser(u, del) }, "מחיקה");
+      const actions = el("td", { className: "actions" });
+      if (u.role === "owner") {
+        actions.append(el("span", { className: "chip owner-chip", title: "חשבון הבעלים" }, "👑 בעלים"));
+      } else if (users.some((x) => x.role === "owner")) {
+        const merge = el("button", { className: "small", title: "שחזור: העברת הרשימות והמכשירים של החשבון הזה לחשבון הבעלים", onclick: () => mergeIntoOwner(u, merge) }, "מיזוג לבעלים");
+        actions.append(merge);
+      }
+      actions.append(del);
       body.append(el("tr", {},
         el("td", {}, u.username),
         idCell(u.userId),
         el("td", { title: u.lastSeenAt ? dateFmt.format(u.lastSeenAt) : "לא נרשם" }, formatRelative(u.lastSeenAt)),
         el("td", { className: "dim" }, dateFmt.format(u.createdAt)),
         el("td", {}, chips),
-        el("td", {}, del)));
+        actions));
+    }
+  }
+
+  /*
+   * Owner recovery for an account lost before automatic recovery existed: the old
+   * account still owns the lists, so fold it into the current owner account.
+   */
+  async function mergeIntoOwner(u, button) {
+    const owner = users.find((x) => x.role === "owner");
+    const msg = `למזג את "${u.username}" לתוך חשבון הבעלים "${owner ? owner.username : ""}"?\n\n` +
+      "• הרשימות שלו יעברו לבעלות חשבון הבעלים (כולל המשתתפים והפריטים)\n" +
+      "• מכשירים שמחוברים לחשבון הזה יחוברו מעכשיו לחשבון הבעלים\n" +
+      "• החשבון הזה יימחק\n\nלשימוש כשחשבון הבעלים הישן אבד ממכשיר. לא ניתן לבטל.";
+    if (!confirm(msg)) return;
+    setBusy(button, true, "ממזג…");
+    try {
+      const res = await api("/users/" + encodeURIComponent(u.userId) + "/merge", { method: "POST", body: {} });
+      toast(`החשבון מוזג לחשבון הבעלים (${res.lists} רשימות)`);
+      await Promise.all([loadUsers(), loadLists(), loadHealth()]);
+    } catch (err) {
+      if (err.status !== 401) toast("המיזוג נכשל: " + err.message, 5000);
+      setBusy(button, false, "מיזוג לבעלים");
     }
   }
 
